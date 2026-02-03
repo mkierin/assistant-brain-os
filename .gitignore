@@ -1,0 +1,15 @@
+# Environment
+.env
+.venv
+venv/
+
+# Dependencies
+node_modules/
+__pycache__/
+
+# Build
+.next/
+
+# Data
+data/
+qdrant_data/

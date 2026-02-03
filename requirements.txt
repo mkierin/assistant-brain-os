@@ -1,0 +1,14 @@
+pydantic
+pydantic-ai
+redis
+python-dotenv
+python-telegram-bot
+chromadb
+openai
+playwright
+sqlalchemy
+httpx
+loguru
+psutil
+pytest
+pytest-asyncio
