@@ -1,15 +1,379 @@
-# Environment
+# ============================================
+# SENSITIVE INFORMATION - NEVER COMMIT!
+# ============================================
+
+# Environment variables and secrets
 .env
-.venv
-venv/
+.env.*
+!.env.example
+*.env
+env.local
+.env.local
+.env.*.local
 
-# Dependencies
-node_modules/
-__pycache__/
+# API Keys and credentials
+*key*.json
+*secret*.json
+*credentials*.json
+*.pem
+*.key
+*.cert
+*.crt
+config/secrets.py
+secrets/
 
-# Build
-.next/
+# Telegram tokens
+telegram_token.txt
+bot_token.txt
 
-# Data
-data/
+# Database files (contain user data)
+*.db
+*.sqlite
+*.sqlite3
+data/brain.db
+data/*.db
+
+# ============================================
+# DATA & STORAGE
+# ============================================
+
+# ChromaDB vector database
+data/chroma/
+data/test_chroma/
+*.chroma
+
+# Qdrant data
 qdrant_data/
+*.qdrant
+
+# User data and backups
+data/
+backups/
+*.backup
+*.bak
+*.dump
+
+# Snapshots and storage
+snapshots/
+storage/
+
+# ============================================
+# PYTHON
+# ============================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+test-results/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# ============================================
+# LOGS & TEMPORARY FILES
+# ============================================
+
+# PM2 logs
+.pm2/
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# OS logs
+/var/log/
+*.log.*
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Audio/voice temporary files
+*.ogg
+*.mp3
+*.wav
+temp_audio/
+
+# ============================================
+# REDIS & QUEUE
+# ============================================
+
+# Redis dumps
+dump.rdb
+*.rdb
+appendonly.aof
+
+# ============================================
+# NODE / JAVASCRIPT
+# ============================================
+
+# Node modules
+node_modules/
+jspm_packages/
+
+# Next.js
+.next/
+out/
+
+# Nuxt.js
+.nuxt
+dist
+
+# Gatsby files
+.cache/
+public
+
+# ============================================
+# IDE & EDITOR FILES
+# ============================================
+
+# VSCode
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# ============================================
+# OPERATING SYSTEM
+# ============================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+.Trash-*
+.nfs*
+
+# ============================================
+# DOCUMENTATION BUILD
+# ============================================
+
+# Sphinx documentation
+docs/_build/
+doc/_build/
+
+# mkdocs documentation
+/site
+
+# ============================================
+# DEPLOYMENT & CI/CD
+# ============================================
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Kubernetes
+*.kubeconfig
+
+# ============================================
+# PERSONAL & DEVELOPMENT
+# ============================================
+
+# Personal notes and TODOs
+notes.md
+todo.md
+scratch.md
+PERSONAL_*.md
+
+# Development databases
+dev.db
+test.db
+local.db
+
+# Debug files
+debug/
+*.debug
+
+# Profiling
+*.prof
+*.lprof
+
+# ============================================
+# LARGE FILES & BINARIES
+# ============================================
+
+# Large model files
+*.bin
+*.h5
+*.pkl
+*.pickle
+*.model
+*.weights
+
+# Compressed files (should be documented)
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Executables
+*.exe
+*.dll
+*.dylib
+
+# ============================================
+# GITHUB SPECIFIC
+# ============================================
+
+# GitHub specific
+.github/workflows/secrets.yml
+
+# ============================================
+# PROJECT SPECIFIC
+# ============================================
+
+# Claude Code temporary files
+.claude/
+.claude.json.backup.*
+
+# Qdrant executable (should be downloaded, not committed)
+qdrant.exe
+qdrant.zip
+qdrant-*
+
+# PM2 ecosystem with secrets
+ecosystem.config.secret.js
+
+# Test output files
+test_output/
+*.test.json
+
+# Migration files with sensitive data
+migrations/data/
+
+# User uploaded content
+uploads/
+user_files/
+
+# ============================================
+# KEEP THESE FILES (Examples)
+# ============================================
+
+# Keep example files
+!.env.example
+!config.example.json
+!secrets.example.json
+!README.md
+!CONTRIBUTING.md
+!LICENSE
+
+# Keep necessary empty directories
+!data/.gitkeep
+!logs/.gitkeep
+!temp/.gitkeep

@@ -3,18 +3,22 @@ from common.database import db
 from common.contracts import KnowledgeEntry, AgentResponse
 from common.config import OPENAI_API_KEY, DEEPSEEK_API_KEY, LLM_PROVIDER
 from pydantic_ai.models.openai import OpenAIModel
+from typing import List
+import uuid
 
 if LLM_PROVIDER == "deepseek":
-    model = OpenAIModel('deepseek-chat', base_url='https://api.deepseek.com', api_key=DEEPSEEK_API_KEY)
+    model = OpenAIModel('deepseek-chat', provider='deepseek')
 else:
     model = 'openai:gpt-4o-mini'
 
+# Use str output for DeepSeek compatibility (no structured outputs)
 archivist_agent = Agent(
     model,
-    result_type=AgentResponse,
+    output_type=str,
     system_prompt="""You are the Archivist. Your job is to store and retrieve knowledge.
 When saving, ensure you extract relevant tags.
-When searching, provide the most relevant context found in the brain."""
+When searching, provide the most relevant context found in the brain.
+Provide clear, concise responses."""
 )
 
 @archivist_agent.tool
@@ -41,11 +45,26 @@ class Archivist:
     async def execute(self, payload: dict) -> AgentResponse:
         action = payload.get("action", "save")
         text = payload.get("text", "")
-        
-        if action == "save":
-            prompt = f"Save this knowledge: {text}. Source: {payload.get('source', 'unknown')}"
-        else:
-            prompt = f"Search for: {text}"
-            
-        result = await archivist_agent.run(prompt)
-        return result.data
+
+        try:
+            if action == "save":
+                prompt = f"Save this knowledge: {text}. Source: {payload.get('source', 'unknown')}"
+            else:
+                prompt = f"Search for: {text}"
+
+            result = await archivist_agent.run(prompt)
+
+            # Convert string output to AgentResponse
+            return AgentResponse(
+                success=True,
+                output=result.output,
+                next_agent=None,
+                data=None,
+                error=None
+            )
+        except Exception as e:
+            return AgentResponse(
+                success=False,
+                output="",
+                error=str(e)
+            )

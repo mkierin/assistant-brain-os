@@ -3,8 +3,9 @@ module.exports = {
     {
       name: 'brain-bot',
       script: 'main.py',
-      interpreter: 'python',
+      interpreter: './venv/bin/python',
       watch: false,
+      cwd: '/root/assistant-brain-os',
       env: {
         NODE_ENV: 'production',
       },
@@ -12,10 +13,11 @@ module.exports = {
     {
       name: 'brain-worker',
       script: 'worker.py',
-      interpreter: 'python',
+      interpreter: './venv/bin/python',
       instances: 2,
       exec_mode: 'fork',
       watch: false,
+      cwd: '/root/assistant-brain-os',
       env: {
         NODE_ENV: 'production',
       },

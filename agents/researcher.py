@@ -9,17 +9,18 @@ from typing import List, Optional
 import asyncio
 
 if LLM_PROVIDER == "deepseek":
-    model = OpenAIModel('deepseek-chat', base_url='https://api.deepseek.com', api_key=DEEPSEEK_API_KEY)
+    model = OpenAIModel('deepseek-chat', provider='deepseek')
 else:
     model = 'openai:gpt-4o-mini'
 
+# Use str output for DeepSeek compatibility
 researcher_agent = Agent(
     model,
-    result_type=AgentResponse,
-
+    output_type=str,
     system_prompt="""You are the Researcher. Your job is to find information on the web or in the brain.
 Use the tools provided to search for information and browse pages.
-Always check the brain first to see if we already know something about the topic."""
+Always check the brain first to see if we already know something about the topic.
+Provide clear, well-organized research results."""
 )
 
 @researcher_agent.tool
@@ -63,6 +64,21 @@ class Researcher:
     async def execute(self, payload: dict) -> AgentResponse:
         topic = payload.get("topic", payload.get("text", ""))
         prompt = f"Research this topic deeply: {topic}"
-        
-        result = await researcher_agent.run(topic)
-        return result.data
+
+        try:
+            result = await researcher_agent.run(prompt)
+
+            # Convert string output to AgentResponse
+            return AgentResponse(
+                success=True,
+                output=result.output,
+                next_agent=None,
+                data=None,
+                error=None
+            )
+        except Exception as e:
+            return AgentResponse(
+                success=False,
+                output="",
+                error=str(e)
+            )
