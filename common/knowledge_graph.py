@@ -1,0 +1,256 @@
+import networkx as nx
+import pickle
+import os
+from typing import List, Dict, Optional, Tuple
+from datetime import datetime
+import hashlib
+
+class KnowledgeGraph:
+    """
+    Lightweight knowledge graph using NetworkX.
+    Stores notes as nodes and relationships as edges (Obsidian-style).
+    """
+
+    def __init__(self, graph_path: str = "data/knowledge_graph.pkl"):
+        self.graph_path = graph_path
+        self.graph = nx.MultiDiGraph()  # Directed graph with multiple edges
+        self._load_graph()
+
+    def _load_graph(self):
+        """Load existing graph from disk"""
+        if os.path.exists(self.graph_path):
+            try:
+                with open(self.graph_path, 'rb') as f:
+                    self.graph = pickle.load(f)
+                print(f"📊 Loaded knowledge graph: {self.graph.number_of_nodes()} nodes, {self.graph.number_of_edges()} edges")
+            except Exception as e:
+                print(f"⚠️  Error loading graph: {e}. Starting fresh.")
+                self.graph = nx.MultiDiGraph()
+        else:
+            print("📊 Initializing new knowledge graph")
+
+    def _save_graph(self):
+        """Persist graph to disk"""
+        os.makedirs(os.path.dirname(self.graph_path), exist_ok=True)
+        with open(self.graph_path, 'wb') as f:
+            pickle.dump(self.graph, f)
+
+    def _generate_node_id(self, title: str, content: str) -> str:
+        """Generate unique node ID from content"""
+        content_hash = hashlib.md5(f"{title}{content}".encode()).hexdigest()[:12]
+        return f"node_{content_hash}"
+
+    def add_note(
+        self,
+        title: str,
+        content: str,
+        tags: List[str] = None,
+        url: Optional[str] = None,
+        metadata: Optional[Dict] = None
+    ) -> str:
+        """
+        Add a note/content as a node in the graph.
+        Returns the node ID.
+        """
+        node_id = self._generate_node_id(title, content)
+
+        # Create node attributes
+        node_attrs = {
+            'title': title,
+            'content': content,
+            'tags': tags or [],
+            'created_at': datetime.now().isoformat(),
+            'type': 'webpage' if url else 'note',
+            'metadata': metadata or {}
+        }
+
+        if url:
+            node_attrs['url'] = url
+
+        # Add node to graph
+        self.graph.add_node(node_id, **node_attrs)
+
+        # Auto-link based on tags (connect notes with shared tags)
+        if tags:
+            self._auto_link_by_tags(node_id, tags)
+
+        self._save_graph()
+        return node_id
+
+    def _auto_link_by_tags(self, node_id: str, tags: List[str]):
+        """
+        Automatically create edges between notes that share tags.
+        This creates an Obsidian-style automatic linking.
+        """
+        # Find other nodes with overlapping tags
+        for other_node in self.graph.nodes():
+            if other_node == node_id:
+                continue
+
+            other_tags = self.graph.nodes[other_node].get('tags', [])
+            shared_tags = set(tags) & set(other_tags)
+
+            if shared_tags:
+                # Create bidirectional "related-to" edges
+                self.graph.add_edge(
+                    node_id,
+                    other_node,
+                    relationship='related-to',
+                    reason=f"Shared tags: {', '.join(shared_tags)}",
+                    created_at=datetime.now().isoformat()
+                )
+                self.graph.add_edge(
+                    other_node,
+                    node_id,
+                    relationship='related-to',
+                    reason=f"Shared tags: {', '.join(shared_tags)}",
+                    created_at=datetime.now().isoformat()
+                )
+
+    def add_relationship(
+        self,
+        source_id: str,
+        target_id: str,
+        relationship: str,
+        metadata: Optional[Dict] = None
+    ):
+        """
+        Add a relationship edge between two notes.
+
+        Common relationship types:
+        - 'mentions': Source mentions target
+        - 'cites': Source cites target
+        - 'related-to': General relationship
+        - 'builds-on': Source builds on target's ideas
+        """
+        edge_attrs = {
+            'relationship': relationship,
+            'created_at': datetime.now().isoformat()
+        }
+
+        if metadata:
+            edge_attrs.update(metadata)
+
+        self.graph.add_edge(source_id, target_id, **edge_attrs)
+        self._save_graph()
+
+    def get_related_notes(self, node_id: str, max_depth: int = 2) -> List[Dict]:
+        """
+        Get notes connected to this node (within max_depth).
+        Returns list of related notes with their metadata.
+        """
+        if node_id not in self.graph:
+            return []
+
+        # Use BFS to find connected nodes within max_depth
+        related = []
+        visited = {node_id}
+        queue = [(node_id, 0)]  # (node, depth)
+
+        while queue:
+            current, depth = queue.pop(0)
+
+            if depth >= max_depth:
+                continue
+
+            # Get neighbors (both directions)
+            neighbors = list(self.graph.neighbors(current)) + \
+                       list(self.graph.predecessors(current))
+
+            for neighbor in neighbors:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, depth + 1))
+
+                    # Get node attributes
+                    node_data = self.graph.nodes[neighbor]
+
+                    # Get edge relationship
+                    edges = list(self.graph.get_edge_data(current, neighbor, default={}).values()) + \
+                           list(self.graph.get_edge_data(neighbor, current, default={}).values())
+
+                    relationship = edges[0].get('relationship', 'related-to') if edges else 'related-to'
+
+                    related.append({
+                        'id': neighbor,
+                        'title': node_data.get('title', 'Untitled'),
+                        'tags': node_data.get('tags', []),
+                        'relationship': relationship,
+                        'depth': depth + 1,
+                        'content_preview': node_data.get('content', '')[:200]
+                    })
+
+        return related
+
+    def search_by_tag(self, tag: str) -> List[Dict]:
+        """Find all notes with a specific tag"""
+        results = []
+
+        for node_id, data in self.graph.nodes(data=True):
+            if tag.lower() in [t.lower() for t in data.get('tags', [])]:
+                results.append({
+                    'id': node_id,
+                    'title': data.get('title', 'Untitled'),
+                    'tags': data.get('tags', []),
+                    'created_at': data.get('created_at'),
+                    'content_preview': data.get('content', '')[:200]
+                })
+
+        return results
+
+    def get_node(self, node_id: str) -> Optional[Dict]:
+        """Get full node data by ID"""
+        if node_id not in self.graph:
+            return None
+
+        return dict(self.graph.nodes[node_id])
+
+    def get_stats(self) -> Dict:
+        """Get graph statistics"""
+        return {
+            'total_nodes': self.graph.number_of_nodes(),
+            'total_edges': self.graph.number_of_edges(),
+            'avg_connections': round(
+                self.graph.number_of_edges() / max(1, self.graph.number_of_nodes()), 2
+            ),
+            'tags': self._get_all_tags()
+        }
+
+    def _get_all_tags(self) -> Dict[str, int]:
+        """Get all tags and their frequencies"""
+        tag_counts = {}
+
+        for _, data in self.graph.nodes(data=True):
+            for tag in data.get('tags', []):
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+        return dict(sorted(tag_counts.items(), key=lambda x: x[1], reverse=True))
+
+    def visualize_connections(self, node_id: str, depth: int = 1) -> str:
+        """
+        Generate a text-based visualization of connections.
+        Shows how notes are linked (Obsidian-style).
+        """
+        if node_id not in self.graph:
+            return "Node not found"
+
+        center_node = self.graph.nodes[node_id]
+        output = f"📊 **{center_node.get('title', 'Untitled')}**\n"
+        output += f"Tags: {', '.join(center_node.get('tags', []))}\n\n"
+
+        related = self.get_related_notes(node_id, max_depth=depth)
+
+        if not related:
+            output += "No connections yet.\n"
+        else:
+            output += f"Connected to {len(related)} notes:\n\n"
+
+            for note in related[:10]:  # Limit to first 10
+                indent = "  " * note['depth']
+                output += f"{indent}→ **{note['title']}**\n"
+                output += f"{indent}  ({note['relationship']}) - Tags: {', '.join(note['tags'])}\n"
+
+        return output
+
+# Global instance
+knowledge_graph = KnowledgeGraph()

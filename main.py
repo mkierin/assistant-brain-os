@@ -191,8 +191,9 @@ Use the menu button or type:
 async def route_intent(text: str) -> dict:
     prompt = f"""Analyze this user request and route it to the correct agent.
 Available agents:
-- archivist: For saving information, thoughts, or searching the brain.
-- researcher: For deep research on topics, browsing the web, or finding new info.
+- content_saver: For saving URLs (web articles, tweets, links) and building knowledge graph. Use when user shares URLs or wants to save content from the web.
+- archivist: For saving plain text information, thoughts, or searching existing knowledge.
+- researcher: For simple web searches and quick lookups.
 - writer: For formatting content, drafting emails, or writing reports.
 
 User Request: {text}
@@ -213,21 +214,27 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 **🤖 Available Agents:**
 
-**1. Archivist** 📚
-Manages your knowledge base
-• "Save this: Python is a programming language"
-• "Remember: Meeting tomorrow at 3pm"
+**1. Content Saver** 💾
+Your Obsidian-style knowledge curator
+• Just share any URL: "https://article.com/interesting-post"
+• Share tweets: "https://twitter.com/user/status/123"
+• Save notes: "Remember this important insight..."
+• Build your connected knowledge graph automatically
+
+**2. Archivist** 📚
+Manages and searches your knowledge base
 • "Search my brain for python notes"
 • "What did I save about meetings?"
+• "Find content about AI"
+• "Show me recent saves"
 
-**2. Researcher** 🔍
-Finds and analyzes information
-• "Research artificial intelligence"
-• "Find information about renewable energy"
-• "Look up the latest news on SpaceX"
-• "Browse https://example.com and summarize"
+**3. Researcher** 🔍
+Quick web searches and lookups
+• "What's the weather like today?"
+• "Quick search: Python tutorials"
+• "Look up SpaceX news"
 
-**3. Writer** ✍️
+**4. Writer** ✍️
 Formats and creates content
 • "Write an email to thank my colleague"
 • "Format this as a report: [your text]"
@@ -671,6 +678,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Natural acknowledgment messages based on agent type
         natural_responses = {
+            "content_saver": [
+                "💾 I'll extract and save that for you!",
+                "📚 Adding this to your knowledge graph...",
+                "🔖 Let me save this content...",
+                "✨ I'll curate that and add it to your collection!",
+                "📝 Extracting and organizing this content..."
+            ],
             "archivist": [
                 "Got it! I'll save that to your knowledge base.",
                 "Perfect, I'll add that to your brain.",
