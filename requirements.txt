@@ -16,3 +16,5 @@ duckduckgo-search
 tavily-python
 networkx
 rank-bm25
+youtube-transcript-api
+yt-dlp

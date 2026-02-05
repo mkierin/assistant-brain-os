@@ -7,28 +7,33 @@ from pydantic_ai.models.openai import OpenAIModel
 from datetime import datetime
 import httpx
 import re
-from typing import Optional
+import json
+import subprocess
+from typing import Optional, Dict, List
 from urllib.parse import urlparse
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 
 if LLM_PROVIDER == "deepseek":
     model = OpenAIModel('deepseek-chat', provider='deepseek')
 else:
     model = 'openai:gpt-4o-mini'
 
-# Content saver agent for links, tweets, and notes
+# Content saver agent for links, tweets, videos, and notes
 content_saver_agent = Agent(
     model,
     output_type=str,
     system_prompt="""You are a Content Curator - an Obsidian-style knowledge manager.
 
 Your role:
-1. Extract and save content from URLs (articles, tweets, threads)
+1. Extract and save content from URLs (articles, tweets, YouTube videos)
 2. Generate meaningful tags and summaries
 3. Identify relationships with existing knowledge
 4. Help build a connected knowledge graph
 
 When saving content:
 - Extract the main content, title, and key information
+- For YouTube videos: extract transcript, summarize key points, include chapters
 - Generate 3-7 relevant tags
 - Write a brief 1-2 sentence summary
 - Note related topics that could link to other content
@@ -323,6 +328,151 @@ async def _extract_with_playwright(url: str) -> Optional[str]:
     return None
 
 @content_saver_agent.tool
+async def extract_youtube_video(ctx: RunContext[None], url: str) -> str:
+    """
+    Extract transcript and metadata from a YouTube video.
+    Handles videos with captions and provides rich summaries.
+    """
+    try:
+        # Extract video ID
+        video_id_match = re.search(r'(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)', url)
+        if not video_id_match:
+            return "Invalid YouTube URL format"
+
+        video_id = video_id_match.group(1)
+        print(f"🎥 Extracting YouTube video: {video_id}")
+
+        # Get transcript
+        try:
+            api = YouTubeTranscriptApi()
+            fetched = api.fetch(video_id, languages=['en'])
+            transcript_text = " ".join([snippet.text for snippet in fetched.snippets])
+            # Keep snippets with timestamps for chapter detection
+            transcript_data = [{'text': s.text, 'start': s.start, 'duration': s.duration}
+                             for s in fetched.snippets]
+            print(f"✅ Got transcript: {len(transcript_text)} characters")
+        except (TranscriptsDisabled, NoTranscriptFound) as e:
+            return f"⚠️ This video doesn't have captions available. Unable to extract transcript.\n\nVideo: {url}\n\nNote: You can still save this manually with a description."
+
+        # Get video metadata using yt-dlp
+        try:
+            result = subprocess.run(
+                ['yt-dlp', '--dump-json', '--no-download', f'https://youtube.com/watch?v={video_id}'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode == 0:
+                metadata = json.loads(result.stdout)
+                title = metadata.get('title', 'Unknown Title')
+                channel = metadata.get('uploader', metadata.get('channel', 'Unknown Channel'))
+                duration = metadata.get('duration', 0)
+                upload_date = metadata.get('upload_date', '')
+                description = metadata.get('description', '')
+            else:
+                # Fallback metadata
+                title = "YouTube Video"
+                channel = "Unknown"
+                duration = 0
+                upload_date = ""
+                description = ""
+
+            print(f"✅ Got metadata: {title} by {channel}")
+
+        except Exception as e:
+            print(f"⚠️ Metadata extraction failed: {e}, using defaults")
+            title = "YouTube Video"
+            channel = "Unknown"
+            duration = 0
+            upload_date = ""
+            description = ""
+
+        # Format duration
+        duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "Unknown"
+
+        # Detect chapters from description
+        chapters = []
+        if description:
+            # Look for timestamp patterns like "00:00 Introduction"
+            chapter_matches = re.findall(r'(\d{1,2}:\d{2}(?::\d{2})?)\s+(.+?)(?:\n|$)', description)
+            chapters = [(time, title.strip()) for time, title in chapter_matches[:20]]  # Limit to 20
+
+        # Create smart summary using LLM
+        summary_prompt = f"""Analyze this YouTube video transcript and create a useful summary:
+
+Title: {title}
+Channel: {channel}
+Duration: {duration_str}
+
+Transcript (first 3000 chars):
+{transcript_text[:3000]}
+
+Create a structured summary with:
+1. TL;DR (2-3 sentences)
+2. Key Points (5-7 bullet points)
+3. Main Concepts/Topics (comma-separated keywords)
+4. Notable Quotes (if any, with context)
+5. Suggested Tags (comma-separated, 5-7 tags)
+
+Format as clear sections with headers."""
+
+        # Use DeepSeek to summarize
+        from openai import AsyncOpenAI
+        llm_client = AsyncOpenAI(
+            api_key=DEEPSEEK_API_KEY,
+            base_url="https://api.deepseek.com"
+        )
+
+        summary_response = await llm_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "user", "content": summary_prompt}],
+            temperature=0.3
+        )
+
+        summary = summary_response.choices[0].message.content
+
+        # Build final formatted content
+        result = f"**YouTube Video Extracted**\n\n"
+        result += f"**Title:** {title}\n"
+        result += f"**Channel:** {channel}\n"
+        result += f"**Duration:** {duration_str}\n"
+
+        if upload_date:
+            formatted_date = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
+            result += f"**Published:** {formatted_date}\n"
+
+        result += f"\n---\n\n{summary}\n\n"
+
+        # Add chapters if available
+        if chapters:
+            result += "## Chapters\n\n"
+            for time, chapter_title in chapters[:10]:  # First 10 chapters
+                # Convert time to seconds for URL
+                time_parts = time.split(':')
+                if len(time_parts) == 2:  # MM:SS
+                    seconds = int(time_parts[0]) * 60 + int(time_parts[1])
+                elif len(time_parts) == 3:  # HH:MM:SS
+                    seconds = int(time_parts[0]) * 3600 + int(time_parts[1]) * 60 + int(time_parts[2])
+                else:
+                    seconds = 0
+
+                result += f"- [{time}](https://youtube.com/watch?v={video_id}&t={seconds}s) {chapter_title}\n"
+
+            result += "\n"
+
+        result += f"---\n\n"
+        result += f"**Transcript Length:** {len(transcript_text)} characters\n"
+        result += f"**Watch:** https://youtube.com/watch?v={video_id}\n\n"
+
+        result += f"*Transcript available in full. This video has been processed and summarized automatically.*"
+
+        return result
+
+    except Exception as e:
+        return f"Error extracting YouTube video: {str(e)}"
+
+@content_saver_agent.tool
 async def save_content(
     ctx: RunContext[None],
     title: str,
@@ -457,7 +607,10 @@ async def execute(topic: str) -> AgentResponse:
         url = url_match.group(0)
 
         # Determine URL type
-        if 'twitter.com' in url or 'x.com' in url:
+        if 'youtube.com' in url or 'youtu.be' in url:
+            print(f"🎥 Detected YouTube video")
+            context = f"Extract and summarize this YouTube video: {url}"
+        elif 'twitter.com' in url or 'x.com' in url:
             print(f"🐦 Detected Twitter/X URL")
             context = f"Extract and save this tweet: {url}"
         else:
