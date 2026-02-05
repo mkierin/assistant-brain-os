@@ -15,3 +15,4 @@ pytest-asyncio
 duckduckgo-search
 tavily-python
 networkx
+rank-bm25

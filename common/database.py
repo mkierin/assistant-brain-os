@@ -7,6 +7,7 @@ import json
 import os
 import httpx
 from typing import List, Dict, Optional
+from rank_bm25 import BM25Okapi
 
 class Database:
     def __init__(self):
@@ -152,6 +153,88 @@ class Database:
             'metadatas': [reranked_metadatas] if reranked_metadatas else results.get('metadatas'),
             'distances': [reranked_distances] if reranked_distances else results.get('distances'),
             'ids': [reranked_ids] if reranked_ids else results.get('ids')
+        }
+
+    def hybrid_search(self, query: str, limit: int = 5, keyword_weight: float = 0.3, semantic_weight: float = 0.7):
+        """
+        Hybrid search combining BM25 (keyword) and semantic (vector) search.
+
+        Args:
+            query: Search query
+            limit: Number of results
+            keyword_weight: Weight for BM25 scores (default 0.3)
+            semantic_weight: Weight for semantic scores (default 0.7)
+
+        Returns:
+            Combined and ranked results
+        """
+        # Get all documents for BM25
+        all_results = self.collection.get()
+
+        if not all_results['documents']:
+            return {'documents': [[]], 'metadatas': [[]], 'distances': [[]], 'ids': [[]]}
+
+        documents = all_results['documents']
+        ids = all_results['ids']
+        metadatas = all_results['metadatas']
+
+        # 1. BM25 keyword search
+        tokenized_docs = [doc.lower().split() for doc in documents]
+        bm25 = BM25Okapi(tokenized_docs)
+        tokenized_query = query.lower().split()
+        bm25_scores = bm25.get_scores(tokenized_query)
+
+        # Normalize BM25 scores to 0-1
+        max_bm25 = max(bm25_scores) if max(bm25_scores) > 0 else 1
+        bm25_scores_norm = [score / max_bm25 for score in bm25_scores]
+
+        # 2. Semantic vector search
+        semantic_results = self.collection.query(
+            query_texts=[query],
+            n_results=min(len(documents), limit * 3)
+        )
+
+        # Create semantic score dict (use inverse distance as score)
+        semantic_scores = {}
+        if semantic_results['documents'][0]:
+            for i, doc_id in enumerate(semantic_results['ids'][0]):
+                # Convert distance to similarity score (lower distance = higher score)
+                distance = semantic_results['distances'][0][i] if semantic_results['distances'] else 0
+                semantic_scores[doc_id] = 1 / (1 + distance)
+
+        # 3. Combine scores
+        combined_scores = {}
+        for i, doc_id in enumerate(ids):
+            bm25_score = bm25_scores_norm[i]
+            semantic_score = semantic_scores.get(doc_id, 0)
+
+            # Weighted combination
+            combined_scores[doc_id] = (
+                keyword_weight * bm25_score +
+                semantic_weight * semantic_score
+            )
+
+        # 4. Sort and get top results
+        ranked_ids = sorted(combined_scores.keys(), key=lambda x: combined_scores[x], reverse=True)[:limit]
+
+        # 5. Build result dict
+        result_docs = []
+        result_metadata = []
+        result_ids = []
+        result_scores = []
+
+        for doc_id in ranked_ids:
+            idx = ids.index(doc_id)
+            result_docs.append(documents[idx])
+            result_metadata.append(metadatas[idx])
+            result_ids.append(doc_id)
+            result_scores.append(combined_scores[doc_id])
+
+        return {
+            'documents': [result_docs],
+            'metadatas': [result_metadata],
+            'ids': [result_ids],
+            'distances': [[1 - score for score in result_scores]]  # Convert back to distances
         }
 
     def get_recent_knowledge(self, limit: int = 5):
