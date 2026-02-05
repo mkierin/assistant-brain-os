@@ -78,6 +78,9 @@ class KnowledgeGraph:
         if tags:
             self._auto_link_by_tags(node_id, tags)
 
+        # Link to today's daily note (temporal organization)
+        self.link_to_daily_note(node_id)
+
         self._save_graph()
         return node_id
 
@@ -361,6 +364,97 @@ class KnowledgeGraph:
             return None
 
         return dict(self.graph.nodes[node_id])
+
+    def get_or_create_daily_note(self, date: str = None) -> str:
+        """
+        Get or create a daily note for the specified date.
+        Obsidian-style daily notes for journaling and temporal organization.
+
+        Args:
+            date: Date string in YYYY-MM-DD format. Defaults to today.
+
+        Returns:
+            node_id of the daily note
+        """
+        if not date:
+            date = datetime.now().strftime("%Y-%m-%d")
+
+        # Check if daily note already exists
+        daily_note_id = f"daily_{date}"
+
+        if daily_note_id in self.graph:
+            return daily_note_id
+
+        # Create new daily note
+        self.graph.add_node(
+            daily_note_id,
+            title=f"Daily Note - {date}",
+            content=f"# {date}\n\n## Notes\n\n## Links\n\n## Reflections\n",
+            tags=['daily', 'journal', date],
+            created_at=datetime.now().isoformat(),
+            type='daily',
+            metadata={'date': date, 'is_daily_note': True}
+        )
+
+        self._save_graph()
+        print(f"📅 Created daily note for {date}")
+
+        return daily_note_id
+
+    def link_to_daily_note(self, content_id: str, date: str = None):
+        """
+        Link a piece of content to its daily note.
+        Enables temporal navigation: "What did I save on this day?"
+        """
+        daily_note_id = self.get_or_create_daily_note(date)
+
+        # Create edge: content -> daily note
+        self.graph.add_edge(
+            content_id,
+            daily_note_id,
+            relationship='created-on',
+            reason=f"Content saved on {date or 'today'}",
+            created_at=datetime.now().isoformat()
+        )
+
+        # Reverse edge for finding content by date
+        self.graph.add_edge(
+            daily_note_id,
+            content_id,
+            relationship='contains',
+            reason=f"Content from this day",
+            created_at=datetime.now().isoformat()
+        )
+
+        self._save_graph()
+
+    def get_daily_note_contents(self, date: str) -> List[Dict]:
+        """
+        Get all content saved on a specific date.
+        Returns list of notes linked to that day's daily note.
+        """
+        daily_note_id = f"daily_{date}"
+
+        if daily_note_id not in self.graph:
+            return []
+
+        # Get all notes linked from daily note
+        contents = []
+        for neighbor in self.graph.neighbors(daily_note_id):
+            node_data = self.graph.nodes[neighbor]
+
+            # Skip if it's another daily note
+            if node_data.get('type') == 'daily':
+                continue
+
+            contents.append({
+                'id': neighbor,
+                'title': node_data.get('title', 'Untitled'),
+                'tags': node_data.get('tags', []),
+                'content_preview': node_data.get('content', '')[:200]
+            })
+
+        return contents
 
     def get_stats(self) -> Dict:
         """Get graph statistics"""
