@@ -148,33 +148,74 @@ class KnowledgeGraph:
         print(f"📝 Created placeholder note: {title}")
         return node_id
 
+    def _parse_tag_hierarchy(self, tag: str) -> List[str]:
+        """
+        Parse hierarchical tag like 'ai/ml/nlp' into all levels.
+        Returns: ['ai', 'ai/ml', 'ai/ml/nlp']
+        """
+        if '/' not in tag:
+            return [tag]
+
+        parts = tag.split('/')
+        hierarchy = []
+        for i in range(len(parts)):
+            hierarchy.append('/'.join(parts[:i+1]))
+
+        return hierarchy
+
+    def _expand_tags_with_hierarchy(self, tags: List[str]) -> List[str]:
+        """
+        Expand tags to include all hierarchy levels.
+        Input: ['ai/ml/nlp', 'research']
+        Output: ['ai', 'ai/ml', 'ai/ml/nlp', 'research']
+        """
+        expanded = []
+        for tag in tags:
+            expanded.extend(self._parse_tag_hierarchy(tag))
+
+        return list(set(expanded))  # Remove duplicates
+
     def _auto_link_by_tags(self, node_id: str, tags: List[str]):
         """
         Automatically create edges between notes that share tags.
+        Supports hierarchical tags like 'ai/ml/nlp'.
         This creates an Obsidian-style automatic linking.
         """
+        # Expand tags to include hierarchy
+        expanded_tags = self._expand_tags_with_hierarchy(tags)
+
         # Find other nodes with overlapping tags
         for other_node in self.graph.nodes():
             if other_node == node_id:
                 continue
 
             other_tags = self.graph.nodes[other_node].get('tags', [])
-            shared_tags = set(tags) & set(other_tags)
+            other_expanded = self._expand_tags_with_hierarchy(other_tags)
+
+            # Find shared tags (considering hierarchy)
+            shared_tags = set(expanded_tags) & set(other_expanded)
 
             if shared_tags:
-                # Create bidirectional "related-to" edges
+                # Determine relationship strength based on hierarchy depth
+                # More specific tags = stronger connection
+                max_depth = max(tag.count('/') for tag in shared_tags)
+                relationship_type = 'strongly-related' if max_depth >= 2 else 'related-to'
+
+                # Create bidirectional edges
                 self.graph.add_edge(
                     node_id,
                     other_node,
-                    relationship='related-to',
+                    relationship=relationship_type,
                     reason=f"Shared tags: {', '.join(shared_tags)}",
+                    strength=len(shared_tags),
                     created_at=datetime.now().isoformat()
                 )
                 self.graph.add_edge(
                     other_node,
                     node_id,
-                    relationship='related-to',
+                    relationship=relationship_type,
                     reason=f"Shared tags: {', '.join(shared_tags)}",
+                    strength=len(shared_tags),
                     created_at=datetime.now().isoformat()
                 )
 
@@ -253,16 +294,33 @@ class KnowledgeGraph:
 
         return related
 
-    def search_by_tag(self, tag: str) -> List[Dict]:
-        """Find all notes with a specific tag"""
+    def search_by_tag(self, tag: str, include_hierarchy: bool = True) -> List[Dict]:
+        """
+        Find all notes with a specific tag.
+        Supports hierarchical tags if include_hierarchy=True.
+
+        Examples:
+        - search_by_tag('ai') finds notes with 'ai', 'ai/ml', 'ai/ml/nlp', etc.
+        - search_by_tag('ai', include_hierarchy=False) finds only exact 'ai' tag
+        """
         results = []
+        tag_lower = tag.lower()
 
         for node_id, data in self.graph.nodes(data=True):
-            if tag.lower() in [t.lower() for t in data.get('tags', [])]:
+            node_tags = data.get('tags', [])
+
+            # Expand tags if hierarchy enabled
+            if include_hierarchy:
+                expanded_tags = self._expand_tags_with_hierarchy(node_tags)
+                tag_matches = [t.lower() for t in expanded_tags]
+            else:
+                tag_matches = [t.lower() for t in node_tags]
+
+            if tag_lower in tag_matches:
                 results.append({
                     'id': node_id,
                     'title': data.get('title', 'Untitled'),
-                    'tags': data.get('tags', []),
+                    'tags': node_tags,  # Show original tags
                     'created_at': data.get('created_at'),
                     'content_preview': data.get('content', '')[:200]
                 })
