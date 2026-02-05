@@ -97,36 +97,162 @@ async def extract_webpage(ctx: RunContext[None], url: str) -> str:
 @content_saver_agent.tool
 async def extract_tweet(ctx: RunContext[None], url: str) -> str:
     """
-    Extract information from a Twitter/X URL.
-    Note: This is a basic extraction. For full thread support, consider using Twitter API.
+    Extract tweet content without Twitter API.
+    Uses Nitter (fast) with Playwright fallback (reliable).
+    Handles single tweets and threads.
     """
     try:
-        # Parse tweet ID from URL
-        tweet_id_match = re.search(r'/status/(\d+)', url)
-        if not tweet_id_match:
-            return "Invalid Twitter URL format"
+        # Parse username and tweet ID
+        tweet_match = re.search(r'(?:twitter\.com|x\.com)/([^/]+)/status/(\d+)', url)
+        if not tweet_match:
+            return "Invalid Twitter/X URL format"
 
-        tweet_id = tweet_id_match.group(1)
+        username = tweet_match.group(1)
+        tweet_id = tweet_match.group(2)
 
-        # Basic extraction without API
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
+        # Try Method 1: Nitter (fast, free, no API)
+        print("🐦 Trying Nitter extraction...")
+        nitter_data = await _extract_from_nitter(username, tweet_id)
+        if nitter_data:
+            return nitter_data
 
-            html = response.text
+        # Try Method 2: Playwright (slower but reliable)
+        print("🎭 Nitter failed, trying Playwright...")
+        playwright_data = await _extract_with_playwright(url)
+        if playwright_data:
+            return playwright_data
 
-            # Try to extract basic info from HTML
-            # Note: Twitter's HTML is complex, this is a basic extraction
-            title_match = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
-            title = title_match.group(1) if title_match else "Tweet"
-
-            return f"Tweet: {title}\n\nTweet ID: {tweet_id}\nSource: {url}\n\nNote: For full content, consider adding Twitter API integration."
+        # Fallback: Basic info
+        return f"Tweet by @{username}\nTweet ID: {tweet_id}\nSource: {url}\n\nNote: Could not extract full content. The tweet may be private or deleted."
 
     except Exception as e:
         return f"Error extracting tweet: {str(e)}"
+
+async def _extract_from_nitter(username: str, tweet_id: str) -> Optional[str]:
+    """Extract tweet from Nitter instance"""
+    # Try multiple Nitter instances (in case one is down)
+    nitter_instances = [
+        'nitter.net',
+        'nitter.poast.org',
+        'nitter.privacydev.net'
+    ]
+
+    for instance in nitter_instances:
+        try:
+            nitter_url = f"https://{instance}/{username}/status/{tweet_id}"
+
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                response = await client.get(nitter_url, headers=headers)
+
+                if response.status_code != 200:
+                    continue
+
+                html = response.text
+
+                # Extract tweet content
+                # Nitter has clean HTML structure
+                tweet_text = ""
+
+                # Extract main tweet text
+                tweet_content_match = re.search(r'<div class="tweet-content[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL)
+                if tweet_content_match:
+                    tweet_text = tweet_content_match.group(1)
+                    # Clean HTML tags
+                    tweet_text = re.sub(r'<[^>]+>', ' ', tweet_text)
+                    tweet_text = re.sub(r'\s+', ' ', tweet_text).strip()
+
+                # Extract author name
+                author_match = re.search(r'<a class="fullname"[^>]*>(.*?)</a>', html)
+                author = author_match.group(1) if author_match else username
+
+                # Extract timestamp
+                time_match = re.search(r'<span class="tweet-date"[^>]*><a[^>]*title="([^"]*)"', html)
+                timestamp = time_match.group(1) if time_match else "Unknown date"
+
+                # Extract stats (retweets, likes)
+                stats = []
+                retweets_match = re.search(r'<span class="icon-retweet"></span>\s*(\d+)', html)
+                if retweets_match:
+                    stats.append(f"🔁 {retweets_match.group(1)} retweets")
+
+                likes_match = re.search(r'<span class="icon-heart"></span>\s*(\d+)', html)
+                if likes_match:
+                    stats.append(f"❤️ {likes_match.group(1)} likes")
+
+                # Check for thread (multiple tweets)
+                thread_tweets = re.findall(r'<div class="timeline-item[^"]*".*?<div class="tweet-content[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL)
+
+                result = f"**Tweet by @{username}** ({author})\n\n"
+
+                if len(thread_tweets) > 1:
+                    result += f"📜 **Thread ({len(thread_tweets)} tweets):**\n\n"
+                    for i, thread_tweet in enumerate(thread_tweets[:10], 1):  # Limit to 10 tweets
+                        clean_tweet = re.sub(r'<[^>]+>', ' ', thread_tweet)
+                        clean_tweet = re.sub(r'\s+', ' ', clean_tweet).strip()
+                        result += f"{i}. {clean_tweet}\n\n"
+                else:
+                    result += f"{tweet_text}\n\n"
+
+                if stats:
+                    result += f"**Stats:** {' · '.join(stats)}\n"
+
+                result += f"**Posted:** {timestamp}\n"
+                result += f"**Source:** https://twitter.com/{username}/status/{tweet_id}"
+
+                print(f"✅ Successfully extracted from {instance}")
+                return result
+
+        except Exception as e:
+            print(f"⚠️  {instance} failed: {e}")
+            continue
+
+    return None
+
+async def _extract_with_playwright(url: str) -> Optional[str]:
+    """Fallback: Extract tweet using Playwright browser automation"""
+    try:
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            )
+            page = await context.new_page()
+
+            await page.goto(url, wait_until='networkidle', timeout=30000)
+
+            # Wait for tweet to load
+            try:
+                await page.wait_for_selector('article', timeout=10000)
+            except:
+                await browser.close()
+                return None
+
+            # Extract tweet text
+            tweet_texts = await page.locator('[data-testid="tweetText"]').all_text_contents()
+            tweet_text = '\n\n'.join(tweet_texts) if tweet_texts else ""
+
+            # Extract author
+            try:
+                author = await page.locator('[data-testid="User-Name"]').first.inner_text()
+            except:
+                author = "Unknown"
+
+            await browser.close()
+
+            if tweet_text:
+                result = f"**Tweet by {author}**\n\n{tweet_text}\n\n**Source:** {url}"
+                print("✅ Successfully extracted with Playwright")
+                return result
+
+    except Exception as e:
+        print(f"⚠️  Playwright extraction failed: {e}")
+
+    return None
 
 @content_saver_agent.tool
 async def save_content(
