@@ -66,84 +66,107 @@ graph TB
     end
 
     subgraph "Orchestration Layer"
-        MAIN[main.py<br/>Orchestrator/Producer]
+        MAIN[main.py<br/>Router & URL Detection]
         ROUTER[Intent Router<br/>LLM-based]
     end
 
     subgraph "Queue System"
-        REDIS[(Redis Queue)]
+        REDIS[(Redis Queue<br/>& Cache)]
     end
 
     subgraph "Worker Layer"
-        W1[Worker 1<br/>worker.py]
-        W2[Worker 2<br/>worker.py]
+        W1[Worker 1<br/>worker.py<br/>+ Rescue Dispatch]
+        W2[Worker 2<br/>worker.py<br/>+ Rescue Dispatch]
     end
 
     subgraph "Agent System"
-        ARCH[Archivist Agent<br/>Save/Search Knowledge]
-        RES[Researcher Agent<br/>Web Research]
-        WRI[Writer Agent<br/>Format Content]
+        CSAVER[💾 Content Saver<br/>YouTube/Web/Tweets]
+        ARCH[📚 Archivist<br/>Hybrid Search & Backlinks]
+        RES[🔬 Researcher<br/>Web Research]
+        WRI[✍️ Writer<br/>Content Creation]
+        RESCUE[🚁 Rescue Agent<br/>AI Self-Healing]
+    end
+
+    subgraph "Knowledge Graph Layer"
+        KG[NetworkX Graph<br/>Bidirectional Links<br/>Tag Hierarchy<br/>Daily Notes]
     end
 
     subgraph "Storage Layer"
-        SQLITE[(SQLite<br/>Metadata)]
-        CHROMA[(ChromaDB<br/>Vector Store)]
+        POSTGRES[(PostgreSQL<br/>Metadata & Relations)]
+        CHROMA[(ChromaDB<br/>Vector Embeddings<br/>Hybrid Search)]
     end
 
     subgraph "External Services"
-        DEEPSEEK[DeepSeek API<br/>LLM & Analysis]
-        OPENAI[OpenAI API<br/>Whisper STT]
+        DEEPSEEK[DeepSeek API<br/>LLM & Summaries]
+        OPENAI[OpenAI API<br/>Whisper STT & Embeddings]
         TAVILY[Tavily API<br/>AI Research]
         DDG[DuckDuckGo<br/>Free Search]
-        BRAVE[Brave Search<br/>Optional]
+        YT[YouTube APIs<br/>Transcripts & Metadata]
         PLAYWRIGHT[Playwright<br/>Web Scraping]
     end
 
-    TGU -->|Text/Voice| TG
+    TGU -->|Text/Voice/URLs| TG
     TG -->|Receive Message| MAIN
-    MAIN -->|STT| OPENAI
+    MAIN -->|Voice| OPENAI
+    MAIN -->|Detect URLs| ROUTER
     MAIN -->|Route Intent| ROUTER
     ROUTER -->|Enqueue Job| REDIS
-    ROUTER -->|Track Status| REDIS
 
     REDIS -->|Pop Job| W1
     REDIS -->|Pop Job| W2
 
-    W1 -->|Load & Execute| ARCH
-    W1 -->|Load & Execute| RES
-    W1 -->|Load & Execute| WRI
-    W2 -->|Load & Execute| ARCH
-    W2 -->|Load & Execute| RES
-    W2 -->|Load & Execute| WRI
+    W1 -->|Execute| CSAVER
+    W1 -->|Execute| ARCH
+    W1 -->|Execute| RES
+    W1 -->|Execute| WRI
+    W1 -->|On Failure| RESCUE
 
-    ARCH -->|Query/Store| SQLITE
-    ARCH -->|Vector Search| CHROMA
-    RES -->|Multi-Source Search| TAVILY
-    RES -->|Multi-Source Search| DDG
-    RES -->|Multi-Source Search| BRAVE
-    RES -->|Cache Results| CHROMA
-    RES -->|Browse Pages| PLAYWRIGHT
-    WRI -->|Query Context| CHROMA
+    W2 -->|Execute| CSAVER
+    W2 -->|Execute| ARCH
+    W2 -->|Execute| RES
+    W2 -->|Execute| WRI
+    W2 -->|On Failure| RESCUE
 
-    ARCH -->|LLM Calls| DEEPSEEK
-    RES -->|Query Analysis| DEEPSEEK
-    RES -->|Synthesis| DEEPSEEK
-    WRI -->|Content Generation| DEEPSEEK
+    CSAVER -->|Extract| YT
+    CSAVER -->|Scrape| PLAYWRIGHT
+    CSAVER -->|Save| KG
+    CSAVER -->|Summarize| DEEPSEEK
 
-    W1 -->|Natural Response| TG
-    W2 -->|Natural Response| TG
-    W1 -->|Log Activity| REDIS
-    W2 -->|Log Activity| REDIS
-    TG -->|Send Response| TGU
+    ARCH -->|Hybrid Search| CHROMA
+    ARCH -->|Get Backlinks| KG
+    ARCH -->|Query Graph| POSTGRES
+
+    RES -->|Search| TAVILY
+    RES -->|Search| DDG
+    RES -->|Scrape| PLAYWRIGHT
+    RES -->|Synthesize| DEEPSEEK
+
+    WRI -->|Generate| DEEPSEEK
+    WRI -->|Context| CHROMA
+
+    RESCUE -->|Diagnose| DEEPSEEK
+    RESCUE -->|Requeue| REDIS
+
+    KG -->|Store| POSTGRES
+    KG -->|Embed| CHROMA
+
+    CHROMA -->|Embeddings| OPENAI
+
+    W1 -->|Success| TG
+    W2 -->|Success| TG
+    TG -->|Response| TGU
 
     style MAIN fill:#4CAF50
     style W1 fill:#2196F3
     style W2 fill:#2196F3
+    style CSAVER fill:#FF9800
     style ARCH fill:#FF9800
     style RES fill:#FF9800
     style WRI fill:#FF9800
+    style RESCUE fill:#E91E63
+    style KG fill:#9C27B0
     style REDIS fill:#F44336
-    style SQLITE fill:#9C27B0
+    style POSTGRES fill:#9C27B0
     style CHROMA fill:#9C27B0
 ```
 
@@ -152,28 +175,40 @@ graph TB
 ```mermaid
 graph LR
     subgraph "PM2 Process Manager"
-        P1[brain-bot<br/>main.py<br/>PID: 1]
-        P2[brain-worker<br/>worker.py<br/>Instance 1<br/>PID: 2]
-        P3[brain-worker<br/>worker.py<br/>Instance 2<br/>PID: 3]
+        P1[brain-bot<br/>main.py<br/>URL Detection & Routing]
+        P2[brain-worker<br/>worker.py<br/>Instance 1<br/>+ Rescue System]
+        P3[brain-worker<br/>worker.py<br/>Instance 2<br/>+ Rescue System]
     end
 
-    subgraph "Services"
-        R[Redis<br/>Port 6379]
-        DB[ChromaDB<br/>File-based]
+    subgraph "Data Services"
+        R[Redis<br/>Queue & Cache<br/>Port 6379]
+        PG[PostgreSQL<br/>Metadata & Graph<br/>Port 5432]
+        CH[ChromaDB<br/>Vector Store<br/>File-based]
+        NX[NetworkX<br/>Knowledge Graph<br/>In-Memory]
     end
 
-    P1 -->|Push Jobs| R
+    P1 -->|Enqueue Jobs| R
     P2 -->|Pop Jobs| R
     P3 -->|Pop Jobs| R
 
-    P2 -->|Read/Write| DB
-    P3 -->|Read/Write| DB
+    P2 -->|Vectors| CH
+    P3 -->|Vectors| CH
+
+    P2 -->|Metadata| PG
+    P3 -->|Metadata| PG
+
+    P2 -->|Graph Ops| NX
+    P3 -->|Graph Ops| NX
+
+    NX -.->|Persists to| PG
 
     style P1 fill:#4CAF50
     style P2 fill:#2196F3
     style P3 fill:#2196F3
     style R fill:#F44336
-    style DB fill:#9C27B0
+    style PG fill:#9C27B0
+    style CH fill:#9C27B0
+    style NX fill:#673AB7
 ```
 
 ---
@@ -209,26 +244,40 @@ graph LR
 
 ### Data Storage
 - **ChromaDB** - Vector database
-  - Semantic search
-  - Search result caching (24hr)
-  - Knowledge embeddings
-- **SQLite** - Metadata storage
-  - Structured data
-  - Knowledge entries
+  - Semantic search with embeddings
+  - Hybrid search (BM25 + semantic)
+  - Contextual retrieval
+  - Search result caching
+- **PostgreSQL** - Relational database
+  - Metadata storage
+  - Tag hierarchy
+  - Bidirectional link relationships
+  - Knowledge graph persistence
+- **NetworkX** - Graph library
+  - In-memory knowledge graph
+  - Bidirectional links
+  - Backlinks computation
+  - Graph traversal & queries
 - **Redis** - Multi-purpose
   - Job queue (FIFO)
   - Active job tracking
   - Completion logging
-  - User settings
+  - User settings & cache
 
-### Infrastructure
-- **PM2** - Process management
-  - 1 bot instance
-  - 2 worker instances (parallel processing)
-  - Auto-restart, monitoring
+### Content Extraction
+- **youtube-transcript-api** - YouTube transcripts (free)
+- **yt-dlp** - YouTube metadata extraction
 - **Playwright** - Web scraping
   - Full page content extraction
   - JavaScript rendering
+  - Tweet extraction
+
+### Infrastructure
+- **PM2** - Process management
+  - 1 bot instance (URL detection & routing)
+  - 2 worker instances (with rescue system)
+  - Auto-restart, monitoring
+- **rank-bm25** - Keyword search for hybrid retrieval
 
 ### Development & Testing
 - **pytest** - Testing framework
