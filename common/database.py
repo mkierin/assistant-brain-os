@@ -278,6 +278,106 @@ class Database:
             'distances': [[1 - score for score in result_scores]]  # Convert back to distances
         }
 
+    def search_with_filters(
+        self,
+        query: str,
+        limit: int = 5,
+        tags: Optional[List[str]] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        content_type: Optional[str] = None,
+        source: Optional[str] = None,
+        min_length: Optional[int] = None,
+        use_hybrid: bool = True
+    ):
+        """
+        Advanced search with metadata filtering.
+
+        Args:
+            query: Search query
+            limit: Max results
+            tags: Filter by tags (OR logic - matches any)
+            date_from: ISO date string (YYYY-MM-DD)
+            date_to: ISO date string (YYYY-MM-DD)
+            content_type: Filter by type ('webpage', 'tweet', 'note', 'daily', 'placeholder')
+            source: Filter by source ('content_saver', 'researcher', 'archivist')
+            min_length: Minimum content length
+            use_hybrid: Use hybrid search (default True)
+
+        Returns:
+            Filtered search results
+        """
+        # Get base search results (more than needed for filtering)
+        if use_hybrid:
+            base_results = self.hybrid_search(query, limit=limit * 5)
+        else:
+            base_results = self.search_knowledge(query, limit=limit * 5)
+
+        if not base_results['documents'][0]:
+            return {'documents': [[]], 'metadatas': [[]], 'distances': [[]], 'ids': [[]]}
+
+        # Apply filters
+        filtered_docs = []
+        filtered_metadata = []
+        filtered_ids = []
+        filtered_distances = []
+
+        for i, doc in enumerate(base_results['documents'][0]):
+            metadata = base_results['metadatas'][0][i] if base_results['metadatas'] else {}
+            doc_id = base_results['ids'][0][i] if base_results['ids'] else None
+            distance = base_results['distances'][0][i] if base_results['distances'] else 0
+
+            # Tag filter (OR logic)
+            if tags:
+                doc_tags = metadata.get('tags', '').split(',')
+                if not any(tag.lower() in [t.lower().strip() for t in doc_tags] for tag in tags):
+                    continue
+
+            # Date filters
+            if date_from or date_to:
+                # Try to get date from metadata or created_at
+                doc_date = metadata.get('saved_at') or metadata.get('created_at', '')
+
+                if date_from and doc_date < date_from:
+                    continue
+
+                if date_to and doc_date > date_to:
+                    continue
+
+            # Content type filter
+            if content_type:
+                doc_type = metadata.get('content_type') or metadata.get('type', '')
+                if doc_type.lower() != content_type.lower():
+                    continue
+
+            # Source filter
+            if source:
+                doc_source = metadata.get('source', '')
+                if source.lower() not in doc_source.lower():
+                    continue
+
+            # Length filter
+            if min_length:
+                if len(doc) < min_length:
+                    continue
+
+            # Passed all filters
+            filtered_docs.append(doc)
+            filtered_metadata.append(metadata)
+            filtered_ids.append(doc_id)
+            filtered_distances.append(distance)
+
+            # Stop if we have enough
+            if len(filtered_docs) >= limit:
+                break
+
+        return {
+            'documents': [filtered_docs],
+            'metadatas': [filtered_metadata],
+            'ids': [filtered_ids],
+            'distances': [filtered_distances]
+        }
+
     def get_recent_knowledge(self, limit: int = 5):
         self.cursor.execute("SELECT * FROM knowledge ORDER BY created_at DESC LIMIT ?", (limit,))
         rows = self.cursor.fetchall()
