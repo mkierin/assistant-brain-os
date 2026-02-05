@@ -1,6 +1,39 @@
 # Assistant Brain OS 🧠
 
-A modular multi-agent system designed to act as your "Second Brain." It listens for input via Telegram (voice and text), intelligently routes requests to specialized AI agents, and processes tasks asynchronously while building a searchable knowledge base.
+A modular multi-agent system designed to act as your "Second Brain." It listens for input via Telegram (voice and text), intelligently routes requests to specialized AI agents, and processes tasks asynchronously while building a searchable knowledge base with Obsidian-style features.
+
+## ✨ Latest Features (v3.0)
+
+### 🎥 YouTube Video Intelligence
+- **Automatic transcript extraction** (free, no API key needed)
+- **Smart summarization** with AI (TL;DR, key points, concepts, quotes)
+- **Chapter detection** with clickable timestamps
+- **Full-text search** of video content
+- Works with 90%+ of videos that have captions
+- Cost: $0.01-0.02 per video (LLM summary only)
+
+### 📚 Obsidian-Style Knowledge Graph
+- **Bidirectional links**: `[[Note Title]]` creates two-way connections
+- **Backlinks view**: See all notes that reference a concept
+- **Tag hierarchy**: `#ai/ml/nlp` creates parent-child relationships
+- **Daily notes**: Temporal organization (YYYY-MM-DD)
+- **NetworkX graph**: Visualize knowledge connections
+- **Auto-linking**: Notes automatically connect to daily notes and related concepts
+
+### 🔍 Advanced Retrieval System
+- **Hybrid search**: BM25 keyword + semantic vector search
+- **Contextual retrieval**: Anthropic's approach for better understanding
+- **Metadata filtering**: Search by tags, date, content type
+- **Ranked results**: Weighted combination of search methods
+- **Backlink traversal**: Follow knowledge connections
+
+### 🚁 Self-Healing Rescue System
+- **AI-powered failure recovery**: Tasks auto-fix when they fail
+- **Intelligent diagnosis**: LLM analyzes root causes
+- **Auto-recovery**: High-confidence fixes applied automatically
+- **PR-ready issues**: Detailed bug reports for developers
+- **Inspired by Temporal**: Durable execution with AI enhancement
+- **5 recovery strategies**: Retry, re-route, patch, skip, or escalate
 
 ---
 
@@ -796,6 +829,104 @@ await context.bot.send_message(
 ---
 
 ## 🤖 Agent System
+
+### Available Agents
+
+#### 1. 💾 Content Saver Agent
+**Purpose**: Extract and save content from various sources
+
+**Capabilities**:
+- **YouTube videos**: Transcript extraction (free!), metadata, LLM summary
+  - Works with 90%+ of videos with captions
+  - Extracts: TL;DR, key points, concepts, quotes, chapters
+  - Cost: $0.01-0.02 per video
+- **Web articles**: Full content extraction with Playwright
+- **Twitter/X**: Tweet extraction and threading
+- **Plain notes**: Save text with auto-tagging
+
+**Tools**:
+- `extract_youtube_video()` - YouTube intelligence
+- `extract_tweet()` - Twitter/X posts
+- `extract_webpage()` - Web scraping
+- `save_to_knowledge_graph()` - Obsidian-style storage with [[links]] and #tags
+- `create_summary()` - AI summarization
+- `get_graph_stats()` - Knowledge graph metrics
+
+**Example**: Share `https://youtube.com/watch?v=abc123` → Extracts transcript, summarizes, saves with tags
+
+#### 2. 📚 Archivist Agent
+**Purpose**: Search and retrieve from knowledge base
+
+**Capabilities**:
+- **Hybrid search**: BM25 keyword + semantic vector (configurable weights)
+- **Contextual retrieval**: Enhanced embeddings with document context
+- **Metadata filtering**: Filter by tags, date, content type
+- **Backlinks**: Obsidian-style "what links here"
+- **Tag hierarchy**: Search parent tag finds all children
+- **Daily notes**: Temporal retrieval
+
+**Tools**:
+- `semantic_search()` - Vector similarity
+- `hybrid_search()` - Combined keyword + semantic (NEW)
+- `search_with_filters()` - Advanced filtering (NEW)
+- `get_backlinks()` - Show all notes linking to concept (NEW)
+- `get_by_tag_hierarchy()` - Hierarchical tag search (NEW)
+- `get_daily_note()` - Retrieve daily notes (NEW)
+
+**Example**: "Find videos about machine learning" → Hybrid search with type=youtube filter
+
+#### 3. 🔬 Researcher Agent
+**Purpose**: Deep web research with multi-source aggregation
+
+**Capabilities**:
+- Multi-source search (Tavily, DuckDuckGo, Brave)
+- Web page extraction and analysis
+- Citation tracking
+- Source synthesis
+- Knowledge base integration
+
+**Tools**:
+- `web_search()` - Multi-provider search
+- `fetch_webpage()` - Content extraction
+- `search_knowledge_base()` - Internal search
+- `synthesize_findings()` - Combine sources
+
+**Example**: "Research transformer architecture papers" → Searches web + KB, synthesizes findings
+
+#### 4. ✍️ Writer Agent
+**Purpose**: Content creation and formatting
+
+**Capabilities**:
+- Draft generation
+- Content editing and refinement
+- Markdown formatting
+- Auto-tagging and linking
+
+**Tools**:
+- `create_draft()` - Generate content
+- `edit_content()` - Refine and improve
+- `format_markdown()` - Structure content
+- `add_metadata()` - Tags and [[links]]
+
+**Example**: "Write a blog post about X using my notes" → Retrieves context, generates draft
+
+#### 5. 🚁 Rescue Agent (NEW)
+**Purpose**: Self-healing system for failed tasks
+
+**Capabilities**:
+- **AI diagnosis**: LLM analyzes failures to find root cause
+- **Auto-recovery**: Attempts intelligent fixes
+- **5 strategies**: Retry with modification, re-route, code patch, skip, escalate
+- **PR generation**: Creates detailed bug reports
+- **Learning system**: Improves over time
+
+**How It Works**:
+1. Task fails 3 times → Rescue agent dispatched
+2. AI analyzes: error patterns, stack traces, context
+3. High confidence (>80%)? → Auto-fix and retry
+4. Low confidence? → Create PR-ready issue for developers
+
+**Example**: YouTube extraction fails → Diagnoses "NoTranscriptFound", creates PR with suggested fix
 
 ### Agent Architecture
 
