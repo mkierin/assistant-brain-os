@@ -377,3 +377,4 @@ user_files/
 !data/.gitkeep
 !logs/.gitkeep
 !temp/.gitkeep
+agents/researcher_backup.py
