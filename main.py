@@ -3,6 +3,7 @@ import asyncio
 import json
 import redis
 import random
+import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from openai import OpenAI
@@ -191,10 +192,12 @@ Use the menu button or type:
 async def route_intent(text: str) -> dict:
     prompt = f"""Analyze this user request and route it to the correct agent.
 Available agents:
-- content_saver: For saving URLs (web articles, tweets, links) and building knowledge graph. Use when user shares URLs or wants to save content from the web.
-- archivist: For saving plain text information, thoughts, or searching existing knowledge.
-- researcher: For simple web searches and quick lookups.
+- content_saver: For saving URLs including YouTube videos, web articles, tweets, and links. ALWAYS use this for ANY URL (youtube.com, youtu.be, twitter.com, x.com, http://, https://). Extracts content and builds knowledge graph.
+- archivist: For saving plain text information, thoughts, or searching existing knowledge (NO URLs).
+- researcher: For simple web searches and quick lookups when user asks a question (NO URLs).
 - writer: For formatting content, drafting emails, or writing reports.
+
+IMPORTANT: If the text contains ANY URL, route to content_saver.
 
 User Request: {text}
 
@@ -662,8 +665,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     thinking_msg = await update.message.reply_text(random.choice(THINKING_MESSAGES))
 
     try:
+        # Direct URL detection (faster and more reliable than LLM routing)
+        url_pattern = r'https?://[^\s]+'
+        if re.search(url_pattern, text, re.IGNORECASE):
+            # Any URL goes to content_saver
+            agent = "content_saver"
+            payload = {"text": text}
         # Determine agent and what will happen
-        if settings['auto_route'] or settings['default_agent'] == 'auto':
+        elif settings['auto_route'] or settings['default_agent'] == 'auto':
             # Route intent using LLM
             routing = await route_intent(text)
             agent = routing.get("agent", "archivist")
