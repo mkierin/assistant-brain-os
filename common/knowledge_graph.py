@@ -1,6 +1,7 @@
 import networkx as nx
 import pickle
 import os
+import re
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 import hashlib
@@ -70,11 +71,81 @@ class KnowledgeGraph:
         # Add node to graph
         self.graph.add_node(node_id, **node_attrs)
 
+        # Parse and create bidirectional links from [[Note]] syntax
+        self._parse_and_create_links(node_id, content, title)
+
         # Auto-link based on tags (connect notes with shared tags)
         if tags:
             self._auto_link_by_tags(node_id, tags)
 
         self._save_graph()
+        return node_id
+
+    def _parse_and_create_links(self, source_id: str, content: str, title: str):
+        """
+        Parse [[Note Title]] syntax and create bidirectional links.
+        This is the core Obsidian-style linking feature.
+        """
+        # Find all [[links]] in content and title
+        link_pattern = r'\[\[([^\]]+)\]\]'
+        matches = re.findall(link_pattern, content + " " + title)
+
+        for link_text in matches:
+            link_text = link_text.strip()
+
+            # Find or create target note
+            target_id = self._find_note_by_title(link_text)
+
+            if not target_id:
+                # Create placeholder note for this link
+                target_id = self._create_placeholder_note(link_text)
+
+            # Create bidirectional "mentions" edges
+            self.graph.add_edge(
+                source_id,
+                target_id,
+                relationship='mentions',
+                reason=f"[[{link_text}]] reference",
+                created_at=datetime.now().isoformat()
+            )
+
+            # Reverse edge for backlinks
+            self.graph.add_edge(
+                target_id,
+                source_id,
+                relationship='mentioned-by',
+                reason=f"Backlink from note",
+                created_at=datetime.now().isoformat()
+            )
+
+            print(f"🔗 Created bidirectional link: {source_id} ↔ {target_id}")
+
+    def _find_note_by_title(self, title: str) -> Optional[str]:
+        """Find existing note by title (case-insensitive)"""
+        title_lower = title.lower()
+        for node_id, data in self.graph.nodes(data=True):
+            if data.get('title', '').lower() == title_lower:
+                return node_id
+        return None
+
+    def _create_placeholder_note(self, title: str) -> str:
+        """
+        Create a placeholder note for a [[link]] that doesn't exist yet.
+        This is like Obsidian's "unresolved links" feature.
+        """
+        node_id = self._generate_node_id(title, f"Placeholder for {title}")
+
+        self.graph.add_node(
+            node_id,
+            title=title,
+            content=f"# {title}\n\n*This note was created as a placeholder for a [[link]]. Add content to complete it.*",
+            tags=['placeholder', 'unresolved'],
+            created_at=datetime.now().isoformat(),
+            type='placeholder',
+            metadata={'is_placeholder': True}
+        )
+
+        print(f"📝 Created placeholder note: {title}")
         return node_id
 
     def _auto_link_by_tags(self, node_id: str, tags: List[str]):
@@ -197,6 +268,34 @@ class KnowledgeGraph:
                 })
 
         return results
+
+    def get_backlinks(self, node_id: str) -> List[Dict]:
+        """
+        Get all notes that link TO this note (backlinks).
+        This is essential for Obsidian-style bidirectional linking.
+        """
+        if node_id not in self.graph:
+            return []
+
+        backlinks = []
+
+        # Get all incoming edges (predecessors)
+        for predecessor in self.graph.predecessors(node_id):
+            # Get edge data
+            edge_data = self.graph.get_edge_data(predecessor, node_id)
+
+            node_data = self.graph.nodes[predecessor]
+
+            backlinks.append({
+                'id': predecessor,
+                'title': node_data.get('title', 'Untitled'),
+                'relationship': edge_data.get('relationship', 'unknown'),
+                'created_at': node_data.get('created_at'),
+                'content_preview': node_data.get('content', '')[:200],
+                'tags': node_data.get('tags', [])
+            })
+
+        return backlinks
 
     def get_node(self, node_id: str) -> Optional[Dict]:
         """Get full node data by ID"""
