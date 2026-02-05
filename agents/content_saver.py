@@ -13,6 +13,7 @@ from typing import Optional, Dict, List
 from urllib.parse import urlparse
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
+from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 
 if LLM_PROVIDER == "deepseek":
     model = OpenAIModel('deepseek-chat', provider='deepseek')
@@ -353,6 +354,34 @@ async def extract_youtube_video(ctx: RunContext[None], url: str) -> str:
             print(f"✅ Got transcript: {len(transcript_text)} characters")
         except (TranscriptsDisabled, NoTranscriptFound) as e:
             return f"⚠️ This video doesn't have captions available. Unable to extract transcript.\n\nVideo: {url}\n\nNote: You can still save this manually with a description."
+        except Exception as e:
+            # Catch all other exceptions (like IP blocking, rate limits, etc.)
+            error_msg = str(e).lower()
+            if 'block' in error_msg or 'forbidden' in error_msg or '403' in error_msg:
+                print(f"⚠️ YouTube blocking transcript access: {e}")
+                return f"""⚠️ **YouTube is blocking transcript extraction**
+
+This can happen due to:
+- IP address being flagged as automated
+- Rate limiting
+- Geographic restrictions
+
+**Workarounds:**
+
+1. **Try again later** (blocks are often temporary)
+
+2. **Manual summary**: Watch the video and tell me the key points, I'll save them
+
+3. **Use video description**: Share the video description/notes
+
+4. **Alternative**: Share an article or blog post about the same topic
+
+**Video:** {url}
+
+Would you like me to save just the video link for now?"""
+            else:
+                print(f"⚠️ Transcript extraction error: {e}")
+                return f"⚠️ Error extracting transcript: {str(e)}\n\nVideo: {url}\n\nYou can try again or save manually."
 
         # Get video metadata using yt-dlp
         try:
