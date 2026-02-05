@@ -36,3 +36,53 @@ class AgentResponse(BaseModel):
     next_agent: Optional[str] = None
     data: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+
+class FailureDetail(BaseModel):
+    """Detailed information about a task failure"""
+    timestamp: str
+    attempt: int
+    agent: str
+    error_message: str
+    stack_trace: Optional[str] = None
+    input_payload: Dict[str, Any]
+
+class RescueContext(BaseModel):
+    """Complete context for rescue agent to diagnose and fix"""
+    job_id: str
+    workflow_goal: str
+    failed_agent: str
+    failure_count: int
+    failure_history: List[FailureDetail]
+    original_payload: Dict[str, Any]
+    agent_code: Optional[str] = None
+    worker_logs: Optional[str] = None
+
+class RecoveryStrategy(str, Enum):
+    RETRY_WITH_MODIFICATION = "retry_with_modification"
+    ROUTE_TO_DIFFERENT_AGENT = "route_to_different_agent"
+    APPLY_CODE_PATCH = "apply_code_patch"
+    ESCALATE_TO_HUMAN = "escalate_to_human"
+    SKIP_STEP = "skip_step"
+
+class RescueDiagnosis(BaseModel):
+    """AI diagnosis and recovery plan"""
+    root_cause: str
+    can_auto_fix: bool
+    recovery_strategy: RecoveryStrategy
+    actions: List[Dict[str, Any]]
+    confidence: float  # 0.0 to 1.0
+    explanation: str
+    pr_summary: Optional[str] = None
+
+class PRIssueSummary(BaseModel):
+    """PR-ready issue report"""
+    issue_id: str
+    title: str
+    summary: str
+    root_cause: str
+    reproduction_steps: List[str]
+    error_logs: str
+    suggested_fix: str
+    impact: str
+    related_files: List[str]
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat())

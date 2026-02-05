@@ -2,10 +2,12 @@ import redis
 import json
 import asyncio
 import importlib
+import traceback
+from datetime import datetime
 from telegram import Bot
 from telegram.error import BadRequest
 from common.config import REDIS_URL, TASK_QUEUE, TELEGRAM_TOKEN
-from common.contracts import Job, JobStatus, AgentResponse
+from common.contracts import Job, JobStatus, AgentResponse, FailureDetail
 
 r = redis.from_url(REDIS_URL)
 bot = Bot(token=TELEGRAM_TOKEN)
@@ -82,12 +84,20 @@ async def process_job(job_data: str):
     try:
         # Dynamically load agent
         agent_module = importlib.import_module(f"agents.{job.current_agent}")
-        agent_class_name = job.current_agent.capitalize()
-        agent_class = getattr(agent_module, agent_class_name)
-        agent_instance = agent_class()
-        
-        # Execute agent
-        response: AgentResponse = await agent_instance.execute(job.payload)
+
+        # Check if agent has a module-level execute function (new pattern)
+        if hasattr(agent_module, 'execute'):
+            # New pattern: module-level execute function
+            execute_func = getattr(agent_module, 'execute')
+            # Pass the text from payload
+            text = job.payload.get("text", "")
+            response: AgentResponse = await execute_func(text)
+        else:
+            # Old pattern: class-based agent
+            agent_class_name = job.current_agent.capitalize()
+            agent_class = getattr(agent_module, agent_class_name)
+            agent_instance = agent_class()
+            response: AgentResponse = await agent_instance.execute(job.payload)
         
         if response.success:
             job.status = JobStatus.COMPLETED
@@ -134,23 +144,53 @@ async def process_job(job_data: str):
         # Remove from processing
         r.delete(f"job:processing:{job.id}")
 
+        # Collect detailed failure information
+        stack_trace = traceback.format_exc()
         print(f"❌ Error processing job {job.id}: {str(e)}")
+
         job.retry_count += 1
-        job.history.append({"agent": job.current_agent, "error": str(e)})
+
+        # Store detailed failure info for rescue agent
+        failure_detail = {
+            "timestamp": datetime.now().isoformat(),
+            "attempt": job.retry_count,
+            "agent": job.current_agent,
+            "error_message": str(e),
+            "stack_trace": stack_trace,
+            "input_payload": job.payload
+        }
+        job.history.append(failure_detail)
 
         if job.retry_count < job.max_retries:
             job.status = JobStatus.PENDING
             print(f"♻️  Retrying job {job.id} (attempt {job.retry_count + 1}/{job.max_retries})")
             r.lpush(TASK_QUEUE, job.model_dump_json())
         else:
+            # 🚁 RESCUE MODE - Dispatch to AI-powered rescue agent
             job.status = JobStatus.WAITING_HUMAN
-            print(f"🚨 Job {job.id} failed permanently after {job.max_retries} retries")
-            user_id = job.payload.get("user_id")
-            if user_id:
-                await bot.send_message(
-                    chat_id=user_id,
-                    text=f"⚠️ Task Failed after {job.max_retries} retries.\nJob ID: {job.id}\nError: {str(e)}\n\nPlease check logs or provide feedback."
-                )
+            print(f"🚨 Job {job.id} failed {job.max_retries} times - Dispatching Rescue Agent...")
+
+            # Build rescue context
+            rescue_context = {
+                "workflow_goal": job.payload.get("text", "Unknown task"),
+                "failure_history": job.history,
+                "agent_code": None,  # Could read agent source code here
+                "worker_logs": None  # Could include recent worker logs
+            }
+
+            # Create rescue job
+            rescue_job = Job(
+                current_agent="rescue_agent",
+                payload={
+                    "failed_job": job.model_dump(),
+                    "context": rescue_context
+                },
+                max_retries=1  # Don't retry rescue itself
+            )
+
+            # Dispatch rescue agent
+            r.lpush(TASK_QUEUE, rescue_job.model_dump_json())
+            print(f"🚁 Rescue Agent dispatched for job {job.id}")
 
 async def worker_loop():
     print("Worker started. Listening for tasks...")

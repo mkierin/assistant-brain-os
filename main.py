@@ -96,6 +96,7 @@ def is_casual_message(text: str) -> bool:
 
     # URLs are never casual - always actionable
     if re.search(r'https?://', text_lower):
+        print(f"🔗 URL detected in is_casual_message, marking as actionable")
         return False
 
     # Check exact matches
@@ -673,6 +674,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url_pattern = r'https?://[^\s]+'
         if re.search(url_pattern, text, re.IGNORECASE):
             # Any URL goes to content_saver
+            print(f"🔍 URL detected: {text[:50]}... -> routing to content_saver")
             agent = "content_saver"
             payload = {"text": text}
         # Determine agent and what will happen
