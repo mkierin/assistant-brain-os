@@ -94,6 +94,10 @@ def is_casual_message(text: str) -> bool:
     """Check if message is casual conversation vs actionable request"""
     text_lower = text.lower().strip()
 
+    # URLs are never casual - always actionable
+    if re.search(r'https?://', text_lower):
+        return False
+
     # Check exact matches
     if text_lower in CASUAL_PATTERNS:
         return True
