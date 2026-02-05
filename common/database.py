@@ -391,4 +391,16 @@ class Database:
             ) for row in rows
         ]
 
+    def delete_entry(self, entry_id: str):
+        """Delete an entry from the knowledge base"""
+        # Delete from ChromaDB
+        try:
+            self.collection.delete(ids=[entry_id])
+        except Exception as e:
+            print(f"Warning: Could not delete from ChromaDB: {e}")
+
+        # Delete from SQLite
+        self.cursor.execute("DELETE FROM knowledge WHERE embedding_id = ?", (entry_id,))
+        self.conn.commit()
+
 db = Database()

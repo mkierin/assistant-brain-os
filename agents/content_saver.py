@@ -24,22 +24,23 @@ else:
 content_saver_agent = Agent(
     model,
     output_type=str,
-    system_prompt="""You are a Content Curator - an Obsidian-style knowledge manager.
+    system_prompt="""You're helping a friend organize their knowledge. Be casual, warm, and conversational.
 
-Your role:
-1. Extract and save content from URLs (articles, tweets, YouTube videos)
-2. Generate meaningful tags and summaries
-3. Identify relationships with existing knowledge
-4. Help build a connected knowledge graph
+When they share content (articles, videos, tweets):
+- Extract and save it to their knowledge base
+- Give them a quick, friendly update
+- Keep responses SHORT - like texting a friend
+- Use simple bullet points (-, not **)
+- Sound natural, not robotic
 
-When saving content:
-- Extract the main content, title, and key information
-- For YouTube videos: extract transcript, summarize key points, include chapters
-- Generate 3-7 relevant tags
-- Write a brief 1-2 sentence summary
-- Note related topics that could link to other content
+Response style:
+"Got it! Saved that article about X.
+- Main topic: Y
+- Tagged as: #tag1 #tag2
+- Connected to your other notes on Z"
 
-Always use your tools to save content properly. Be concise and organized."""
+NO bold (**text**), NO formal language, NO long explanations.
+Think: texting a friend who's excited to share cool stuff with you."""
 )
 
 @content_saver_agent.tool
@@ -353,35 +354,24 @@ async def extract_youtube_video(ctx: RunContext[None], url: str) -> str:
                              for s in fetched.snippets]
             print(f"✅ Got transcript: {len(transcript_text)} characters")
         except (TranscriptsDisabled, NoTranscriptFound) as e:
-            return f"⚠️ This video doesn't have captions available. Unable to extract transcript.\n\nVideo: {url}\n\nNote: You can still save this manually with a description."
+            return f"Hmm, that video doesn't have captions available, so I can't extract the transcript.\n\nWant to watch it and share the key points with me? I'll save those instead!"
         except Exception as e:
             # Catch all other exceptions (like IP blocking, rate limits, etc.)
             error_msg = str(e).lower()
             if 'block' in error_msg or 'forbidden' in error_msg or '403' in error_msg:
                 print(f"⚠️ YouTube blocking transcript access: {e}")
-                return f"""⚠️ **YouTube is blocking transcript extraction**
+                return f"""YouTube's blocking the transcript extraction right now (happens sometimes with automated tools).
 
-This can happen due to:
-- IP address being flagged as automated
-- Rate limiting
-- Geographic restrictions
+Few options:
+- Try again in a bit (usually temporary)
+- Watch it and tell me the main points
+- Share the video description instead
+- Got an article about the same thing?
 
-**Workarounds:**
-
-1. **Try again later** (blocks are often temporary)
-
-2. **Manual summary**: Watch the video and tell me the key points, I'll save them
-
-3. **Use video description**: Share the video description/notes
-
-4. **Alternative**: Share an article or blog post about the same topic
-
-**Video:** {url}
-
-Would you like me to save just the video link for now?"""
+Want me to just save the link for now?"""
             else:
                 print(f"⚠️ Transcript extraction error: {e}")
-                return f"⚠️ Error extracting transcript: {str(e)}\n\nVideo: {url}\n\nYou can try again or save manually."
+                return f"Couldn't get the transcript - {str(e)}\n\nWant to try again or just tell me what it's about?"
 
         # Get video metadata using yt-dlp
         try:
@@ -461,22 +451,17 @@ Format as clear sections with headers."""
 
         summary = summary_response.choices[0].message.content
 
-        # Build final formatted content
-        result = f"**YouTube Video Extracted**\n\n"
-        result += f"**Title:** {title}\n"
-        result += f"**Channel:** {channel}\n"
-        result += f"**Duration:** {duration_str}\n"
+        # Build natural, conversational response
+        result = f"Got it! Saved that video.\n\n"
+        result += f"{title}\n"
+        result += f"by {channel} • {duration_str}\n\n"
 
-        if upload_date:
-            formatted_date = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
-            result += f"**Published:** {formatted_date}\n"
-
-        result += f"\n---\n\n{summary}\n\n"
+        result += f"{summary}\n\n"
 
         # Add chapters if available
         if chapters:
-            result += "## Chapters\n\n"
-            for time, chapter_title in chapters[:10]:  # First 10 chapters
+            result += "Chapters:\n"
+            for time, chapter_title in chapters[:5]:  # First 5 chapters
                 # Convert time to seconds for URL
                 time_parts = time.split(':')
                 if len(time_parts) == 2:  # MM:SS
@@ -486,15 +471,11 @@ Format as clear sections with headers."""
                 else:
                     seconds = 0
 
-                result += f"- [{time}](https://youtube.com/watch?v={video_id}&t={seconds}s) {chapter_title}\n"
+                result += f"- {time} {chapter_title}\n"
 
             result += "\n"
 
-        result += f"---\n\n"
-        result += f"**Transcript Length:** {len(transcript_text)} characters\n"
-        result += f"**Watch:** https://youtube.com/watch?v={video_id}\n\n"
-
-        result += f"*Transcript available in full. This video has been processed and summarized automatically.*"
+        result += f"Full transcript saved ({len(transcript_text)} chars). You can search for it anytime!"
 
         return result
 
@@ -621,6 +602,35 @@ async def get_graph_stats(ctx: RunContext[None]) -> str:
 
     except Exception as e:
         return f"Error getting stats: {str(e)}"
+
+@content_saver_agent.tool
+async def remove_last_entry(ctx: RunContext[None]) -> str:
+    """
+    Remove the most recently saved entry from the knowledge base.
+    Use when user says "delete that", "remove last one", "undo that", etc.
+    """
+    try:
+        # Get the most recent entry
+        results = db.search_knowledge("", limit=1, sort_by="created_at", sort_order="desc")
+
+        if not results:
+            return "Nothing to remove - your knowledge base is empty"
+
+        last_entry = results[0]
+        entry_id = last_entry.get('id')
+        title = last_entry.get('title', 'Untitled')
+
+        # Remove from database
+        db.delete_entry(entry_id)
+
+        # Remove from knowledge graph
+        if knowledge_graph.graph.has_node(entry_id):
+            knowledge_graph.graph.remove_node(entry_id)
+
+        return f"Removed: {title}\n\nAll gone!"
+
+    except Exception as e:
+        return f"Couldn't remove that - {str(e)}"
 
 async def execute(topic: str) -> AgentResponse:
     """
