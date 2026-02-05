@@ -12,3 +12,5 @@ loguru
 psutil
 pytest
 pytest-asyncio
+duckduckgo-search
+tavily-python

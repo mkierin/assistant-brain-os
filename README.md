@@ -58,9 +58,12 @@ graph TB
     end
 
     subgraph "External Services"
-        DEEPSEEK[DeepSeek API<br/>LLM Provider]
+        DEEPSEEK[DeepSeek API<br/>LLM & Analysis]
         OPENAI[OpenAI API<br/>Whisper STT]
-        WEB[Web Browsing<br/>Playwright]
+        TAVILY[Tavily API<br/>AI Research]
+        DDG[DuckDuckGo<br/>Free Search]
+        BRAVE[Brave Search<br/>Optional]
+        PLAYWRIGHT[Playwright<br/>Web Scraping]
     end
 
     TGU -->|Text/Voice| TG
@@ -68,6 +71,7 @@ graph TB
     MAIN -->|STT| OPENAI
     MAIN -->|Route Intent| ROUTER
     ROUTER -->|Enqueue Job| REDIS
+    ROUTER -->|Track Status| REDIS
 
     REDIS -->|Pop Job| W1
     REDIS -->|Pop Job| W2
@@ -81,16 +85,22 @@ graph TB
 
     ARCH -->|Query/Store| SQLITE
     ARCH -->|Vector Search| CHROMA
-    RES -->|Query Context| CHROMA
-    RES -->|Browse Web| WEB
+    RES -->|Multi-Source Search| TAVILY
+    RES -->|Multi-Source Search| DDG
+    RES -->|Multi-Source Search| BRAVE
+    RES -->|Cache Results| CHROMA
+    RES -->|Browse Pages| PLAYWRIGHT
     WRI -->|Query Context| CHROMA
 
     ARCH -->|LLM Calls| DEEPSEEK
-    RES -->|LLM Calls| DEEPSEEK
-    WRI -->|LLM Calls| DEEPSEEK
+    RES -->|Query Analysis| DEEPSEEK
+    RES -->|Synthesis| DEEPSEEK
+    WRI -->|Content Generation| DEEPSEEK
 
-    W1 -->|Notify Result| TG
-    W2 -->|Notify Result| TG
+    W1 -->|Natural Response| TG
+    W2 -->|Natural Response| TG
+    W1 -->|Log Activity| REDIS
+    W2 -->|Log Activity| REDIS
     TG -->|Send Response| TGU
 
     style MAIN fill:#4CAF50
@@ -135,6 +145,72 @@ graph LR
 
 ---
 
+## 🔧 Technology Stack
+
+### Core Framework
+- **Python 3.12+** - Primary language
+- **PydanticAI** - Agent framework with tool support
+- **python-telegram-bot** - Telegram integration
+- **AsyncIO** - Asynchronous execution
+
+### AI & LLM Services
+- **DeepSeek API** - Primary LLM provider (cost-effective)
+  - Agent reasoning & synthesis
+  - Query analysis & breakdown
+  - Natural conversation
+- **OpenAI API** - Voice transcription only
+  - Whisper STT for voice messages
+
+### Research APIs (Multi-Source)
+- **Tavily** - AI-optimized research (primary)
+  - $0.002 per search
+  - 1000 free searches/month
+  - AI-generated summaries + sources
+- **DuckDuckGo** - Free web search (secondary)
+  - Unlimited searches
+  - Privacy-focused
+  - Good general coverage
+- **Brave Search** - Optional third source
+  - 2000 free searches/month
+  - Comprehensive results
+
+### Data Storage
+- **ChromaDB** - Vector database
+  - Semantic search
+  - Search result caching (24hr)
+  - Knowledge embeddings
+- **SQLite** - Metadata storage
+  - Structured data
+  - Knowledge entries
+- **Redis** - Multi-purpose
+  - Job queue (FIFO)
+  - Active job tracking
+  - Completion logging
+  - User settings
+
+### Infrastructure
+- **PM2** - Process management
+  - 1 bot instance
+  - 2 worker instances (parallel processing)
+  - Auto-restart, monitoring
+- **Playwright** - Web scraping
+  - Full page content extraction
+  - JavaScript rendering
+
+### Development & Testing
+- **pytest** - Testing framework
+  - 45+ test cases
+  - Async support
+  - Real API testing
+- **pytest-cov** - Coverage reporting
+
+### Monitoring & Logging
+- **PM2 logs** - Process output
+- **Redis tracking** - Job status
+- **Custom `/monitor` command** - Real-time activity
+
+---
+
 ## 🔧 System Components
 
 ### 1. **Main Bot (main.py)** - The Orchestrator/Producer
@@ -176,12 +252,24 @@ graph LR
 - **Use Cases:** Saving notes, retrieving past information, building knowledge base
 
 #### **Researcher Agent** (`agents/researcher.py`)
-- **Purpose:** Deep research and information gathering
+- **Purpose:** Multi-source deep research and information gathering
+- **Strategy:** Query analysis → Multi-source search → Cross-verification → Synthesis
 - **Tools:**
-  - `search_brain()`: Check existing knowledge first
-  - `search_web()`: Search the web for new information
-  - `browse_page()`: Extract content from URLs using Playwright
-- **Use Cases:** Research topics, fact-checking, gathering external information
+  - `analyze_query()`: Break complex queries into focused sub-questions
+  - `search_brain()`: Check existing knowledge cache first
+  - `search_tavily()`: AI-optimized research with summaries (primary source)
+  - `search_web_ddg()`: DuckDuckGo free search (secondary source)
+  - `search_brave()`: Brave Search for additional coverage (optional)
+  - `browse_page()`: Extract full content from URLs using Playwright
+- **Features:**
+  - Smart caching (24hr) to reduce API costs
+  - Parallel multi-source searching
+  - Cross-source verification
+  - Natural language synthesis
+- **Use Cases:** Research topics, complex analysis, fact-checking, latest information
+- **Performance:**
+  - Simple queries: 20-30s (1-2 sources)
+  - Complex queries: 60-90s (all sources + analysis)
 
 #### **Writer Agent** (`agents/writer.py`)
 - **Purpose:** Content formatting and synthesis
@@ -199,12 +287,27 @@ graph LR
 #### **ChromaDB** (`data/chroma/`)
 - Vector database for semantic search
 - Stores embeddings of knowledge entries
+- **Search result caching** (24-hour TTL)
+  - Tavily results cached per query
+  - DuckDuckGo results cached per query
+  - Brave results cached per query
 - Enables RAG (Retrieval-Augmented Generation)
+- Reduces API costs by reusing recent searches
 
-### 5. **Redis Queue** (Port 6379)
-- Message broker for asynchronous task distribution
-- Job queue with FIFO processing
-- Enables horizontal scaling of workers
+### 5. **Redis** (Port 6379)
+- **Job queue** with FIFO processing
+  - Asynchronous task distribution
+  - Enables horizontal scaling of workers
+- **Real-time monitoring**
+  - Active job tracking (`job:processing:*`)
+  - Completion logging (`job:completed:*`)
+  - Duration metrics
+- **User settings storage**
+  - Preferences per user
+  - Configuration persistence
+- **Agent activity logs**
+  - Tool execution tracking
+  - Performance metrics
 
 ---
 
@@ -1109,58 +1212,90 @@ python main.py
 
 ### Complete Documentation Set
 
-This repository includes comprehensive documentation for different aspects of the system:
+This repository includes 10 focused documentation files covering all aspects of the system:
 
-#### **User Documentation**
-- **`TELEGRAM_GUIDE.md`** - Complete Telegram user guide
-  - How to interact with the bot
-  - Command reference
-  - Example use cases
-  - Voice message guide
-  - Tips and tricks
+#### **📖 Core Documentation**
+1. **`README.md`** (this file)
+   - Complete system architecture
+   - Technology stack
+   - Setup & installation
+   - Agent system overview
+   - Troubleshooting guide
 
-#### **Developer Documentation**
-- **`README.md`** (this file) - Architecture and system overview
-- **`TESTING_GUIDE.md`** - Testing documentation
-  - Test suite overview
-  - How to run tests
-  - Writing new tests
-  - Test coverage requirements
-- **`AGENTS.md`** - Agent development guide
-  - Creating new agents
-  - Agent tool patterns
-  - Best practices
+2. **`AGENTS.md`**
+   - Original agent specifications
+   - Agent design patterns
+   - Tool development guide
 
-#### **Operations Documentation**
-- **`SETUP_COMPLETE.md`** - Deployment summary
-  - Current configuration
-  - Running services
-  - PM2 process management
-  - Quick troubleshooting
+#### **👤 User Guides**
+3. **`TELEGRAM_GUIDE.md`**
+   - How to use the bot
+   - Command reference
+   - Example interactions
+   - Voice message guide
+   - Tips and tricks
 
-#### **Security Documentation**
-- **`SECURITY_CHECKLIST.md`** - Security procedures
-  - Pre-commit checklist
-  - Incident response procedures
-  - Key rotation schedules
-  - Security audit guidelines
-- **`SECURITY_SUMMARY.md`** - Implementation verification
-  - What's protected
-  - How to verify
-  - Testing security measures
+#### **🔬 Research System**
+4. **`MULTI_SOURCE_RESEARCH.md`**
+   - Multi-source research architecture
+   - Tavily + DuckDuckGo + Brave integration
+   - Query analysis & breakdown
+   - Caching strategy
+   - Performance optimization
 
-#### **Quick Reference**
+#### **🔍 Monitoring & Operations**
+5. **`MONITORING_GUIDE.md`**
+   - Real-time monitoring with `/monitor`
+   - Parallel processing (2 workers)
+   - PM2 logs and metrics
+   - Redis tracking
+   - Performance benchmarks
+
+6. **`SETUP_COMPLETE.md`**
+   - Deployment summary
+   - Running services
+   - PM2 process management
+   - Quick troubleshooting
+
+#### **🧪 Testing**
+7. **`TESTING_GUIDE.md`**
+   - General test suite overview
+   - Running all tests
+   - Test coverage
+
+8. **`RESEARCHER_TESTING.md`**
+   - Researcher-specific tests (30+ tests)
+   - Real API testing (not mocked)
+   - Edge cases
+   - Performance tests
+
+9. **`TEST_RESULTS.md`**
+   - Latest test findings
+   - Performance analysis
+   - Optimization opportunities
+
+#### **🔒 Security**
+10. **`SECURITY_CHECKLIST.md`**
+    - Pre-commit checklist
+    - Incident response
+    - Key rotation schedules
+    - Security best practices
+
+---
+
+### Quick Reference
 
 | Need to... | Read this file |
 |------------|----------------|
-| Use the bot as an end user | `TELEGRAM_GUIDE.md` |
-| Understand the architecture | `README.md` (this file) |
-| Set up the system | `README.md` → Setup section |
-| Run tests | `TESTING_GUIDE.md` |
-| Add a new agent | `AGENTS.md` |
-| Check security | `SECURITY_CHECKLIST.md` |
-| Troubleshoot issues | `README.md` → Troubleshooting |
-| Deploy to production | `SETUP_COMPLETE.md` |
+| **Understand the system** | `README.md` (start here) |
+| **Use the bot** | `TELEGRAM_GUIDE.md` |
+| **Monitor activity** | `MONITORING_GUIDE.md` |
+| **Research capabilities** | `MULTI_SOURCE_RESEARCH.md` |
+| **Run tests** | `TESTING_GUIDE.md` or `RESEARCHER_TESTING.md` |
+| **Add new agents** | `AGENTS.md` |
+| **Security audit** | `SECURITY_CHECKLIST.md` |
+| **Deploy/troubleshoot** | `SETUP_COMPLETE.md` |
+| **Test results** | `TEST_RESULTS.md` |
 
 ---
 

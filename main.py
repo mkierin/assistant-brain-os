@@ -509,6 +509,85 @@ Use /status to check if the system is running.
 """
     await update.message.reply_text(queue_text, parse_mode='Markdown')
 
+async def monitor_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Real-time monitoring of jobs and agent activity"""
+    try:
+        queue_size = r.llen(TASK_QUEUE)
+
+        # Get active jobs (jobs currently being processed)
+        active_jobs = []
+        processing_keys = r.keys("job:processing:*")
+        for key in processing_keys[:5]:  # Show up to 5 active jobs
+            job_data = r.get(key)
+            if job_data:
+                try:
+                    job_info = json.loads(job_data)
+                    active_jobs.append(job_info)
+                except:
+                    pass
+
+        # Get recent completions (last 10 minutes)
+        recent_completed = []
+        completed_keys = r.keys("job:completed:*")
+        for key in completed_keys[-5:]:  # Show last 5 completed
+            job_data = r.get(key)
+            if job_data:
+                try:
+                    job_info = json.loads(job_data)
+                    recent_completed.append(job_info)
+                except:
+                    pass
+
+        # Get agent activity logs
+        agent_activity = []
+        activity_keys = r.keys("agent:activity:*")
+        for key in activity_keys[-5:]:  # Last 5 activities
+            activity = r.get(key)
+            if activity:
+                agent_activity.append(activity.decode('utf-8'))
+
+        # Build monitoring message
+        monitor_text = f"""🔍 **Real-Time Monitoring**
+
+📊 **Queue Status:**
+• Pending jobs: {queue_size}
+• Worker instances: 2 (parallel processing)
+• Max concurrent: 2 tasks at once
+
+⚡ **Currently Processing:**"""
+
+        if active_jobs:
+            for job in active_jobs:
+                agent = job.get('agent', 'unknown')
+                started = job.get('started', 'unknown')
+                monitor_text += f"\n• 🔄 {agent.title()} Agent (started {started}s ago)"
+        else:
+            monitor_text += "\n• ✅ No active jobs (workers idle)"
+
+        monitor_text += "\n\n✅ **Recent Completions:**"
+        if recent_completed:
+            for job in recent_completed:
+                agent = job.get('agent', 'unknown')
+                duration = job.get('duration', 0)
+                monitor_text += f"\n• ✓ {agent.title()} Agent ({duration}s)"
+        else:
+            monitor_text += "\n• No recent completions"
+
+        if agent_activity:
+            monitor_text += "\n\n🔧 **Recent Agent Activity:**"
+            for activity in agent_activity:
+                monitor_text += f"\n• {activity}"
+
+        monitor_text += "\n\n💡 **Tips:**"
+        monitor_text += "\n• Use /queue to see pending jobs"
+        monitor_text += "\n• Use /status for system health"
+        monitor_text += "\n• Check logs: `pm2 logs brain-worker`"
+
+        await update.message.reply_text(monitor_text, parse_mode='Markdown')
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Monitoring error: {str(e)}")
+
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear the task queue (admin only or confirmation)"""
     queue_size = r.llen(TASK_QUEUE)
@@ -590,30 +669,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payload["source"] = "telegram"
         payload["user_id"] = user_id
 
-        # Create human-readable description of what will happen
-        agent_descriptions = {
-            "archivist": {
-                "emoji": "📚",
-                "name": "Archivist",
-                "action": "I'll save this to your knowledge base" if "save" in text.lower() else "I'll search your knowledge base"
-            },
-            "researcher": {
-                "emoji": "🔍",
-                "name": "Researcher",
-                "action": "I'll research this topic and find relevant information"
-            },
-            "writer": {
-                "emoji": "✍️",
-                "name": "Writer",
-                "action": "I'll help format and write this content for you"
-            }
+        # Natural acknowledgment messages based on agent type
+        natural_responses = {
+            "archivist": [
+                "Got it! I'll save that to your knowledge base.",
+                "Perfect, I'll add that to your brain.",
+                "Let me save that for you.",
+                "I'll remember that!"
+            ] if "save" in text.lower() or "remember" in text.lower() else [
+                "Let me check what we have on that...",
+                "I'll search the knowledge base for you.",
+                "Let me see what I can find...",
+                "Checking what we know about that..."
+            ],
+            "researcher": [
+                "Interesting topic! Let me research that for you.",
+                "I'll look into that and see what I can find.",
+                "Let me dig into this...",
+                "On it - researching now!",
+                "Great question! Let me find some information on that."
+            ],
+            "writer": [
+                "I'll help you with that!",
+                "Let me draft something for you.",
+                "I can help format that.",
+                "I'll work on that for you!"
+            ]
         }
 
-        agent_info = agent_descriptions.get(agent, {
-            "emoji": "🤖",
-            "name": agent.title(),
-            "action": "I'll process this request"
-        })
+        # Get natural response for this agent
+        responses = natural_responses.get(agent, ["I'm on it!"])
+        natural_message = random.choice(responses)
 
         # Create Job
         job = Job(
@@ -625,16 +711,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Push to Redis
         r.lpush(TASK_QUEUE, job.model_dump_json())
 
-        # Update thinking message with clear status
-        status_message = (
-            f"{agent_info['emoji']} **{agent_info['name']} activated!**\n\n"
-            f"📋 **What I'm doing:**\n{agent_info['action']}\n\n"
-            f"⏱️ **Status:** Processing...\n"
-            f"🆔 **Job ID:** `{job.id}`\n\n"
-            f"⏳ You'll get a notification when I'm done!"
-        )
-
-        await thinking_msg.edit_text(status_message, parse_mode='Markdown')
+        # Send natural acknowledgment (delete thinking message, send new one)
+        await thinking_msg.delete()
+        await update.message.reply_text(natural_message)
 
     except Exception as e:
         await thinking_msg.edit_text(
@@ -650,6 +729,7 @@ async def setup_bot_menu(application: Application):
         BotCommand("help", "📖 Detailed help & examples"),
         BotCommand("settings", "⚙️ Configure preferences"),
         BotCommand("status", "📊 System status check"),
+        BotCommand("monitor", "🔍 Real-time agent activity"),
         BotCommand("agents", "🤖 Learn about agents"),
         BotCommand("queue", "📋 View pending jobs"),
     ]
@@ -668,6 +748,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("monitor", monitor_command))
     application.add_handler(CommandHandler("agents", agents_command))
     application.add_handler(CommandHandler("queue", queue_command))
     application.add_handler(CommandHandler("clear", clear_command))
