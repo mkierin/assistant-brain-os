@@ -98,7 +98,7 @@ async def extract_webpage(ctx: RunContext[None], url: str) -> str:
 async def extract_tweet(ctx: RunContext[None], url: str) -> str:
     """
     Extract tweet content without Twitter API.
-    Uses Nitter (fast) with Playwright fallback (reliable).
+    Uses FxTwitter API (best), Nitter (backup), and Playwright (fallback).
     Handles single tweets and threads.
     """
     try:
@@ -110,14 +110,20 @@ async def extract_tweet(ctx: RunContext[None], url: str) -> str:
         username = tweet_match.group(1)
         tweet_id = tweet_match.group(2)
 
-        # Try Method 1: Nitter (fast, free, no API)
-        print("🐦 Trying Nitter extraction...")
+        # Try Method 1: FxTwitter API (best - clean JSON, free)
+        print("🚀 Trying FxTwitter API...")
+        fxtwitter_data = await _extract_from_fxtwitter(username, tweet_id)
+        if fxtwitter_data:
+            return fxtwitter_data
+
+        # Try Method 2: Nitter (backup)
+        print("🐦 FxTwitter failed, trying Nitter...")
         nitter_data = await _extract_from_nitter(username, tweet_id)
         if nitter_data:
             return nitter_data
 
-        # Try Method 2: Playwright (slower but reliable)
-        print("🎭 Nitter failed, trying Playwright...")
+        # Try Method 3: Playwright (last resort)
+        print("🎭 Trying Playwright fallback...")
         playwright_data = await _extract_with_playwright(url)
         if playwright_data:
             return playwright_data
@@ -127,6 +133,68 @@ async def extract_tweet(ctx: RunContext[None], url: str) -> str:
 
     except Exception as e:
         return f"Error extracting tweet: {str(e)}"
+
+async def _extract_from_fxtwitter(username: str, tweet_id: str) -> Optional[str]:
+    """Extract tweet using FxTwitter API - free, clean JSON"""
+    try:
+        api_url = f"https://api.fxtwitter.com/{username}/status/{tweet_id}"
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = await client.get(api_url, headers=headers)
+
+            if response.status_code != 200:
+                return None
+
+            data = response.json()
+
+            if data.get('code') != 200:
+                return None
+
+            tweet = data.get('tweet', {})
+            author = tweet.get('author', {})
+
+            # Extract data
+            text = tweet.get('text', '')
+            author_name = author.get('name', username)
+            author_handle = author.get('screen_name', username)
+            created_at = tweet.get('created_at', 'Unknown date')
+
+            # Stats
+            likes = tweet.get('likes', 0)
+            retweets = tweet.get('retweets', 0)
+            replies = tweet.get('replies', 0)
+            views = tweet.get('views', 0)
+
+            # Format result
+            result = f"**Tweet by @{author_handle}** ({author_name})\n\n"
+            result += f"{text}\n\n"
+
+            # Add stats
+            stats = []
+            if views > 0:
+                stats.append(f"👁️ {views:,} views")
+            if likes > 0:
+                stats.append(f"❤️ {likes:,} likes")
+            if retweets > 0:
+                stats.append(f"🔁 {retweets:,} retweets")
+            if replies > 0:
+                stats.append(f"💬 {replies:,} replies")
+
+            if stats:
+                result += f"**Stats:** {' · '.join(stats)}\n"
+
+            result += f"**Posted:** {created_at}\n"
+            result += f"**Source:** https://twitter.com/{username}/status/{tweet_id}"
+
+            print("✅ Successfully extracted from FxTwitter API")
+            return result
+
+    except Exception as e:
+        print(f"⚠️  FxTwitter API failed: {e}")
+        return None
 
 async def _extract_from_nitter(username: str, tweet_id: str) -> Optional[str]:
     """Extract tweet from Nitter instance"""
