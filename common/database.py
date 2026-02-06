@@ -5,6 +5,7 @@ from .config import DATABASE_PATH, CHROMA_PATH, OPENAI_API_KEY
 from .contracts import KnowledgeEntry
 import json
 import os
+import re
 import uuid
 import httpx
 from typing import List, Dict, Optional
@@ -38,6 +39,9 @@ class Database:
                 created_at TEXT
             )
         """)
+        # Indexes for common query patterns
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_created_at ON knowledge(created_at)")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_source ON knowledge(source)")
         self.conn.commit()
 
     def _create_contextual_text(self, entry: KnowledgeEntry) -> str:
@@ -219,6 +223,11 @@ class Database:
         """
         Hybrid search combining BM25 (keyword) and semantic (vector) search.
 
+        Uses a two-phase approach:
+        1. ChromaDB semantic search to get top candidates (fast, O(1) via index)
+        2. BM25 keyword scoring on ONLY those candidates (not all documents)
+        3. Combine scores with weighted fusion
+
         Args:
             query: Search query
             limit: Number of results
@@ -228,18 +237,26 @@ class Database:
         Returns:
             Combined and ranked results
         """
-        # Get all documents for BM25
-        all_results = self.collection.get()
-
-        if not all_results['documents']:
+        # Phase 1: Semantic search to get candidate set (fast - uses vector index)
+        candidate_count = min(limit * 4, self.collection.count() or limit)
+        if candidate_count == 0:
             return {'documents': [[]], 'metadatas': [[]], 'distances': [[]], 'ids': [[]]}
 
-        documents = all_results['documents']
-        ids = all_results['ids']
-        metadatas = all_results['metadatas']
+        semantic_results = self.collection.query(
+            query_texts=[query],
+            n_results=candidate_count
+        )
 
-        # 1. BM25 keyword search
-        tokenized_docs = [doc.lower().split() for doc in documents]
+        if not semantic_results['documents'][0]:
+            return {'documents': [[]], 'metadatas': [[]], 'distances': [[]], 'ids': [[]]}
+
+        candidates = semantic_results['documents'][0]
+        candidate_ids = semantic_results['ids'][0]
+        candidate_metadatas = semantic_results['metadatas'][0]
+        candidate_distances = semantic_results['distances'][0]
+
+        # Phase 2: BM25 keyword scoring on ONLY the candidates (not all docs)
+        tokenized_docs = [doc.lower().split() for doc in candidates]
         bm25 = BM25Okapi(tokenized_docs)
         tokenized_query = query.lower().split()
         bm25_scores = bm25.get_scores(tokenized_query)
@@ -248,53 +265,29 @@ class Database:
         max_bm25 = max(bm25_scores) if max(bm25_scores) > 0 else 1
         bm25_scores_norm = [score / max_bm25 for score in bm25_scores]
 
-        # 2. Semantic vector search
-        semantic_results = self.collection.query(
-            query_texts=[query],
-            n_results=min(len(documents), limit * 3)
-        )
-
-        # Create semantic score dict (use inverse distance as score)
-        semantic_scores = {}
-        if semantic_results['documents'][0]:
-            for i, doc_id in enumerate(semantic_results['ids'][0]):
-                # Convert distance to similarity score (lower distance = higher score)
-                distance = semantic_results['distances'][0][i] if semantic_results['distances'] else 0
-                semantic_scores[doc_id] = 1 / (1 + distance)
-
-        # 3. Combine scores
-        combined_scores = {}
-        for i, doc_id in enumerate(ids):
+        # Phase 3: Combine scores
+        combined = []
+        for i in range(len(candidates)):
+            semantic_score = 1 / (1 + candidate_distances[i])
             bm25_score = bm25_scores_norm[i]
-            semantic_score = semantic_scores.get(doc_id, 0)
+            combined_score = keyword_weight * bm25_score + semantic_weight * semantic_score
+            combined.append((i, combined_score))
 
-            # Weighted combination
-            combined_scores[doc_id] = (
-                keyword_weight * bm25_score +
-                semantic_weight * semantic_score
-            )
+        # Sort by combined score and take top results
+        combined.sort(key=lambda x: x[1], reverse=True)
+        top = combined[:limit]
 
-        # 4. Sort and get top results
-        ranked_ids = sorted(combined_scores.keys(), key=lambda x: combined_scores[x], reverse=True)[:limit]
-
-        # 5. Build result dict
-        result_docs = []
-        result_metadata = []
-        result_ids = []
-        result_scores = []
-
-        for doc_id in ranked_ids:
-            idx = ids.index(doc_id)
-            result_docs.append(documents[idx])
-            result_metadata.append(metadatas[idx])
-            result_ids.append(doc_id)
-            result_scores.append(combined_scores[doc_id])
+        # Build result dict
+        result_docs = [candidates[i] for i, _ in top]
+        result_metadata = [candidate_metadatas[i] for i, _ in top]
+        result_ids = [candidate_ids[i] for i, _ in top]
+        result_scores = [score for _, score in top]
 
         return {
             'documents': [result_docs],
             'metadatas': [result_metadata],
             'ids': [result_ids],
-            'distances': [[1 - score for score in result_scores]]  # Convert back to distances
+            'distances': [[1 - score for score in result_scores]]
         }
 
     def search_with_filters(
@@ -397,6 +390,30 @@ class Database:
             'distances': [filtered_distances]
         }
 
+    def _extract_title(self, text: str, meta: dict) -> str:
+        """Extract a meaningful title from text or metadata."""
+        # 1. Check metadata title
+        title = meta.get('title', '')
+        if title:
+            return title
+        # 2. Check for markdown heading
+        if text.startswith('#'):
+            title = text.split('\n')[0].strip('# ').strip()
+            if title:
+                return title
+        # 3. Check for "RESEARCH:" or similar prefix patterns
+        prefix_match = re.match(r'^(RESEARCH|NOTE|SAVE|SUMMARY):\s*(.+)', text, re.IGNORECASE)
+        if prefix_match:
+            rest = prefix_match.group(2).strip().split('\n')[0][:80]
+            if rest:
+                return rest
+        # 4. Use first non-empty line, truncated
+        for line in text.split('\n'):
+            line = line.strip()
+            if line and len(line) > 2:
+                return line[:80] + ('...' if len(line) > 80 else '')
+        return 'Untitled'
+
     def search_clean(self, query: str, limit: int = 5) -> List[Dict]:
         """
         Search the knowledge base and return clean, display-ready results.
@@ -429,12 +446,7 @@ class Database:
             if row:
                 meta = json.loads(row[4]) if row[4] else {}
                 text = row[1] or ""
-                # Extract title from text (first heading) or metadata
-                title = meta.get('title', '')
-                if not title and text.startswith('#'):
-                    title = text.split('\n')[0].strip('# ').strip()
-                if not title:
-                    title = text[:80].strip()
+                title = self._extract_title(text, meta)
 
                 clean_results.append({
                     'id': row[0],
@@ -465,11 +477,7 @@ class Database:
         for row in rows:
             meta = json.loads(row[4]) if row[4] else {}
             text = row[1] or ""
-            title = meta.get('title', '')
-            if not title and text.startswith('#'):
-                title = text.split('\n')[0].strip('# ').strip()
-            if not title:
-                title = text[:80].strip()
+            title = self._extract_title(text, meta)
 
             results.append({
                 'id': row[0],
@@ -563,5 +571,24 @@ class Database:
         # Delete from SQLite
         self.cursor.execute("DELETE FROM knowledge WHERE id = ?", (entry_id,))
         self.conn.commit()
+
+    def cleanup_garbage(self, min_length: int = 3) -> int:
+        """Remove entries with garbage content (too short, only punctuation, etc.).
+
+        Returns the number of entries removed.
+        """
+        import re
+        self.cursor.execute("SELECT id, text FROM knowledge")
+        rows = self.cursor.fetchall()
+        removed = 0
+        for row in rows:
+            entry_id, text = row[0], row[1] or ""
+            text = text.strip()
+            # Remove if too short or no alphanumeric characters
+            if len(text) < min_length or not re.search(r'[a-zA-Z0-9]', text):
+                self.delete_entry(entry_id)
+                removed += 1
+                print(f"  Removed garbage entry: {repr(text[:50])}")
+        return removed
 
 db = Database()

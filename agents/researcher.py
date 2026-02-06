@@ -1,86 +1,131 @@
-from pydantic_ai import Agent, RunContext
 from common.database import db
 from common.contracts import AgentResponse
-from common.config import DEEPSEEK_API_KEY, LLM_PROVIDER
-from pydantic_ai.models.openai import OpenAIModel
+from common.config import DEEPSEEK_API_KEY, LLM_PROVIDER, OPENAI_API_KEY, MODEL_NAME
 from duckduckgo_search import DDGS
-from typing import Optional
 
-if LLM_PROVIDER == "deepseek":
-    model = OpenAIModel('deepseek-chat', provider='deepseek')
-else:
-    model = 'openai:gpt-4o-mini'
 
-# Simplified researcher - just basic web search
-researcher_agent = Agent(
-    model,
-    output_type=str,
-    system_prompt="""You are a simple Research Assistant for quick web lookups.
-
-Your role:
-1. Check the knowledge base first with search_brain()
-2. If needed, do a quick web search with search_web()
-3. Provide concise, helpful answers
-
-Keep responses short and to the point. For deep content curation, the user should use the content_saver instead."""
-)
-
-@researcher_agent.tool
-async def search_brain(ctx: RunContext[None], query: str) -> str:
-    """
-    Search the existing knowledge base for information.
-    Always check this first before searching the web.
-    """
+def _search_brain_direct(query: str, limit: int = 3) -> list:
+    """Search knowledge base directly. Returns list of dicts or empty list."""
     try:
-        results = db.search_knowledge(query, limit=3)
-
-        if not results['documents'][0]:
-            return "Nothing found in knowledge base."
-
-        output = "Found in your knowledge base:\n\n"
-        for i, doc in enumerate(results['documents'][0][:3], 1):
-            preview = doc[:300] + "..." if len(doc) > 300 else doc
-            output += f"{i}. {preview}\n\n"
-
-        return output
-
+        return db.search_clean(query, limit=limit)
     except Exception as e:
-        return f"Error searching knowledge base: {str(e)}"
+        print(f"⚠️ Brain search error: {e}")
+        return []
 
-@researcher_agent.tool
-async def search_web(ctx: RunContext[None], query: str, max_results: int = 5) -> str:
-    """
-    Quick web search using DuckDuckGo.
-    Returns short summaries and links.
-    """
+
+def _search_web_direct(query: str, max_results: int = 5) -> list:
+    """Search web via DuckDuckGo directly. Returns list of dicts or empty list."""
     try:
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
-
-        if not results:
-            return "No web results found."
-
-        output = "Web search results:\n\n"
-        for i, result in enumerate(results, 1):
-            output += f"{i}. **{result['title']}**\n"
-            output += f"   {result['body']}\n"
-            output += f"   {result['href']}\n\n"
-
-        return output
-
+            return list(ddgs.text(query, max_results=max_results))
     except Exception as e:
-        return f"Error searching web: {str(e)}"
+        print(f"⚠️ Web search error: {e}")
+        return []
 
-async def execute(topic: str) -> AgentResponse:
+
+async def _synthesize_answer(topic: str, brain_results: list, web_results: list) -> str:
+    """Use LLM to synthesize a nice answer from raw search results.
+    This is the ONLY LLM call — used for formatting, not decision-making.
     """
-    Simple research execution - check knowledge base, then web if needed.
+    from openai import AsyncOpenAI
+
+    if LLM_PROVIDER == "deepseek":
+        client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
+        model = "deepseek-chat"
+    else:
+        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        model = MODEL_NAME
+
+    # Build context from raw results
+    context = ""
+    if brain_results:
+        context += "From the user's knowledge base:\n"
+        for r in brain_results:
+            title = r.get('title', 'Untitled')
+            content = r.get('content', '')[:300]
+            context += f"- {title}: {content}\n"
+        context += "\n"
+
+    if web_results:
+        context += "From the web:\n"
+        for r in web_results:
+            context += f"- {r.get('title', '')}: {r.get('body', '')}\n"
+            context += f"  Source: {r.get('href', '')}\n"
+
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": (
+                "You are a helpful research assistant. Synthesize a clear, concise answer "
+                "from the search results provided. Be casual and friendly. "
+                "Mention if info came from the user's knowledge base vs the web. "
+                "Include relevant source links. Keep it under 300 words."
+            )},
+            {"role": "user", "content": f"Question: {topic}\n\n{context}"}
+        ],
+        temperature=0.3,
+        max_tokens=600
+    )
+    return response.choices[0].message.content.strip()
+
+
+def _format_raw_results(topic: str, brain_results: list, web_results: list) -> str:
+    """Fallback: format results without LLM if synthesis fails."""
+    output = ""
+
+    if brain_results:
+        output += "From your knowledge base:\n\n"
+        for i, r in enumerate(brain_results, 1):
+            title = r.get('title', 'Untitled')
+            content = r.get('content', '')[:200]
+            output += f"{i}. {title}\n   {content}\n\n"
+
+    if web_results:
+        output += "From the web:\n\n"
+        for i, r in enumerate(web_results, 1):
+            output += f"{i}. {r.get('title', 'No title')}\n"
+            output += f"   {r.get('body', '')}\n"
+            output += f"   {r.get('href', '')}\n\n"
+
+    if not output:
+        output = f"I couldn't find anything about '{topic}'. Try rephrasing your question."
+
+    return output.strip()
+
+
+async def execute(payload) -> AgentResponse:
     """
+    Research execution: search brain + web directly, then synthesize.
+    LLM is used ONLY for formatting the answer — searches always happen.
+    """
+    topic = payload.get("text", "") if isinstance(payload, dict) else payload
     print(f"🔍 Researcher activated for: {topic}")
 
     try:
-        # Run the agent
-        result = await researcher_agent.run(f"Research this query: {topic}")
-        output = result.output
+        # Step 1: Always search both sources (no LLM deciding whether to search)
+        brain_results = _search_brain_direct(topic)
+        web_results = _search_web_direct(topic)
+
+        has_results = bool(brain_results or web_results)
+
+        if brain_results:
+            print(f"🧠 Found {len(brain_results)} brain results")
+        if web_results:
+            print(f"🌐 Found {len(web_results)} web results")
+
+        if not has_results:
+            return AgentResponse(
+                success=True,
+                output=f"I searched your knowledge base and the web but couldn't find anything about '{topic}'. Try rephrasing or being more specific.",
+                agent="researcher"
+            )
+
+        # Step 2: Try LLM synthesis (the ONLY LLM call — for formatting, not decision-making)
+        try:
+            output = await _synthesize_answer(topic, brain_results, web_results)
+        except Exception as synth_err:
+            print(f"⚠️ LLM synthesis failed ({synth_err}), using raw format")
+            output = _format_raw_results(topic, brain_results, web_results)
 
         return AgentResponse(
             success=True,

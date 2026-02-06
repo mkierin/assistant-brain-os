@@ -260,9 +260,9 @@ class TestYouTubeSummaryProvider:
         """The YouTube transcript summarizer should check LLM_PROVIDER."""
         import inspect
         import agents.content_saver as cs
-        source = inspect.getsource(cs.extract_youtube_video)
+        source = inspect.getsource(cs._extract_youtube_content)
         # Should check the provider, not hardcode DeepSeek
-        assert "_provider" in source or "LLM_PROVIDER" in source
+        assert "LLM_PROVIDER" in source
         # Should NOT have hardcoded DeepSeek-only setup
         assert 'llm_client = AsyncOpenAI(\n            api_key=DEEPSEEK_API_KEY,\n            base_url="https://api.deepseek.com"\n        )\n\n        summary_response' not in source
 
@@ -447,17 +447,15 @@ class TestRemoveLastEntry:
     """Bug: remove_last_entry called search_knowledge with invalid params
     (sort_by, sort_order) and misinterpreted the result format."""
 
-    def test_remove_last_entry_uses_get_recent(self):
-        """remove_last_entry should use get_recent_knowledge instead of
-        search_knowledge with invalid params."""
+    def test_content_saver_has_direct_save(self):
+        """Content saver should save directly to DB, not rely on LLM tool calling."""
         import inspect
         import agents.content_saver as cs
-        source = inspect.getsource(cs.remove_last_entry)
-        # Should NOT call search_knowledge with sort params
-        assert "sort_by" not in source
-        assert "sort_order" not in source
-        # Should use get_recent_knowledge
-        assert "get_recent_knowledge" in source
+        # Should have a direct save function
+        assert hasattr(cs, '_save_content_to_db')
+        source = inspect.getsource(cs._save_content_to_db)
+        assert "add_knowledge" in source
+        assert "knowledge_graph" in source
 
 
 # ============================================================
@@ -820,6 +818,485 @@ class TestArchivistTopicExtraction:
         # Split the source to get just the search branch
         assert "archivist_agent.run" not in source.split("action == \"search\"")[1].split("else:")[0], \
             "Search path should not call archivist_agent.run()"
+
+
+# ============================================================
+# BUG FIX 18: hybrid_search loads all documents
+# ============================================================
+class TestHybridSearchPerformance:
+    """Bug: hybrid_search() called collection.get() which loads ALL documents
+    into memory for BM25. This is O(n) memory and O(n*m) compute.
+    Fix: Two-phase approach - semantic search for candidates first, then
+    BM25 only on those candidates."""
+
+    def test_hybrid_search_does_not_call_collection_get(self):
+        """hybrid_search should NOT call self.collection.get() (loads all docs)."""
+        import inspect
+        from common.database import Database
+        source = inspect.getsource(Database.hybrid_search)
+        assert "self.collection.get()" not in source, \
+            "hybrid_search should not call collection.get() - use collection.query() instead"
+
+    def test_hybrid_search_uses_collection_query(self):
+        """hybrid_search should use collection.query() for semantic candidates."""
+        import inspect
+        from common.database import Database
+        source = inspect.getsource(Database.hybrid_search)
+        assert "self.collection.query(" in source
+
+    def test_hybrid_search_returns_correct_format(self):
+        """hybrid_search should return dict with nested lists."""
+        from common.database import db
+        results = db.hybrid_search("test query", limit=3)
+        assert 'documents' in results
+        assert 'ids' in results
+        assert 'metadatas' in results
+        assert 'distances' in results
+        assert isinstance(results['documents'], list)
+        assert isinstance(results['documents'][0], list)
+
+
+# ============================================================
+# BUG FIX 19: Content validation before saving
+# ============================================================
+class TestContentValidation:
+    """Bug: Archivist saved garbage content like '.' (periods) because there
+    was no minimum content validation. Fix: Added _is_meaningful_content()."""
+
+    def test_is_meaningful_content_importable(self):
+        """_is_meaningful_content should be importable from archivist."""
+        from agents.archivist import _is_meaningful_content
+        assert callable(_is_meaningful_content)
+
+    def test_rejects_period(self):
+        """A single period should be rejected."""
+        from agents.archivist import _is_meaningful_content
+        assert _is_meaningful_content(".") is False
+
+    def test_rejects_empty(self):
+        """Empty string should be rejected."""
+        from agents.archivist import _is_meaningful_content
+        assert _is_meaningful_content("") is False
+
+    def test_rejects_whitespace(self):
+        """Only whitespace should be rejected."""
+        from agents.archivist import _is_meaningful_content
+        assert _is_meaningful_content("   ") is False
+
+    def test_rejects_only_punctuation(self):
+        """Only punctuation should be rejected."""
+        from agents.archivist import _is_meaningful_content
+        assert _is_meaningful_content("...") is False
+        assert _is_meaningful_content("!!!") is False
+
+    def test_accepts_real_content(self):
+        """Real content should be accepted."""
+        from agents.archivist import _is_meaningful_content
+        assert _is_meaningful_content("AI is transforming healthcare") is True
+
+    def test_accepts_short_but_real(self):
+        """Short but real words should be accepted."""
+        from agents.archivist import _is_meaningful_content
+        assert _is_meaningful_content("hello") is True
+
+    def test_cleanup_garbage_exists(self):
+        """Database should have cleanup_garbage() method."""
+        from common.database import db
+        assert hasattr(db, 'cleanup_garbage')
+        assert callable(db.cleanup_garbage)
+
+
+# ============================================================
+# BUG FIX 20: Worker passes full payload to agents
+# ============================================================
+class TestWorkerPayload:
+    """Bug: Worker only passed text string to module-level execute() functions,
+    losing user_id, source, and other context. Fix: Pass full payload dict."""
+
+    def test_worker_passes_payload_not_text(self):
+        """Worker should pass job.payload to execute(), not just text."""
+        import inspect
+        with open("worker.py") as f:
+            source = f.read()
+        # Should pass full payload
+        assert "await execute_func(job.payload)" in source or \
+               "execute_func(job.payload)" in source, \
+            "Worker should pass job.payload to execute_func"
+        # Should NOT extract just text
+        assert 'text = job.payload.get("text", "")' not in source, \
+            "Worker should not extract only text from payload"
+
+    def test_archivist_accepts_dict_payload(self):
+        """Archivist execute() should accept a dict payload."""
+        import inspect
+        import agents.archivist as archivist
+        sig = inspect.signature(archivist.execute)
+        params = list(sig.parameters.keys())
+        assert "payload" in params
+
+    def test_researcher_accepts_dict_payload(self):
+        """Researcher execute() should accept a dict payload."""
+        import inspect
+        import agents.researcher as researcher
+        sig = inspect.signature(researcher.execute)
+        params = list(sig.parameters.keys())
+        assert "payload" in params
+
+    def test_content_saver_accepts_dict_payload(self):
+        """Content saver execute() should accept a dict payload."""
+        import inspect
+        import agents.content_saver as content_saver
+        sig = inspect.signature(content_saver.execute)
+        params = list(sig.parameters.keys())
+        assert "payload" in params
+
+    def test_coder_accepts_dict_payload(self):
+        """Coder execute() should accept a dict payload."""
+        import inspect
+        import agents.coder as coder
+        sig = inspect.signature(coder.execute)
+        params = list(sig.parameters.keys())
+        assert "payload" in params
+
+    def test_archivist_handles_string_fallback(self):
+        """Archivist should handle string input for backward compatibility."""
+        from agents.archivist import _detect_action
+        # If someone passes a plain string, it should still work
+        # The execute() function checks isinstance(payload, str)
+        import inspect
+        import agents.archivist as archivist
+        source = inspect.getsource(archivist.execute)
+        assert "isinstance(payload, str)" in source
+
+
+# ============================================================
+# BUG FIX 21: SQLite indexes and title extraction
+# ============================================================
+class TestDatabaseIndexesAndTitles:
+    """Bug: No SQLite indexes on frequently queried columns. Title extraction
+    failed for most entries (only worked if text started with '#')."""
+
+    def test_sqlite_has_created_at_index(self):
+        """SQLite should have an index on created_at."""
+        from common.database import db
+        db.cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_knowledge_created_at'")
+        result = db.cursor.fetchone()
+        assert result is not None, "Should have index on created_at"
+
+    def test_sqlite_has_source_index(self):
+        """SQLite should have an index on source."""
+        from common.database import db
+        db.cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_knowledge_source'")
+        result = db.cursor.fetchone()
+        assert result is not None, "Should have index on source"
+
+    def test_extract_title_from_heading(self):
+        """_extract_title should extract from markdown heading."""
+        from common.database import db
+        title = db._extract_title("# My Great Title\n\nSome content here", {})
+        assert title == "My Great Title"
+
+    def test_extract_title_from_metadata(self):
+        """_extract_title should prefer metadata title."""
+        from common.database import db
+        title = db._extract_title("Some text", {'title': 'Metadata Title'})
+        assert title == "Metadata Title"
+
+    def test_extract_title_from_research_prefix(self):
+        """_extract_title should handle 'RESEARCH: ...' prefix."""
+        from common.database import db
+        title = db._extract_title("RESEARCH: Based on my analysis of quantum computing", {})
+        assert "Based on my analysis" in title
+
+    def test_extract_title_fallback_first_line(self):
+        """_extract_title should fall back to first non-empty line."""
+        from common.database import db
+        title = db._extract_title("This is just plain text content without a heading", {})
+        assert "This is just plain text content" in title
+
+    def test_extract_title_untitled_for_garbage(self):
+        """_extract_title should return 'Untitled' for empty/whitespace text."""
+        from common.database import db
+        title = db._extract_title("", {})
+        assert title == "Untitled"
+
+
+# ============================================================
+# BUG FIX 22: is_casual_message false positives
+# ============================================================
+class TestCasualMessageDetection:
+    """Bug: 2-word messages like 'Docker help' or 'search Python' were
+    classified as casual because len(text.split()) <= 2 returned True
+    before action keyword check could override it. Fix: Only 1-word
+    messages are casual (action keywords are already checked first)."""
+
+    def test_two_word_action_not_casual(self):
+        """'search Python' should NOT be casual - 'search' is an action keyword."""
+        from main import is_casual_message
+        assert is_casual_message("search Python") is False
+
+    def test_two_word_question_not_casual(self):
+        """'what time' should NOT be casual - 'what' is an action keyword."""
+        from main import is_casual_message
+        assert is_casual_message("what time") is False
+
+    def test_single_word_casual(self):
+        """'hello' should be casual."""
+        from main import is_casual_message
+        assert is_casual_message("hello") is True
+
+    def test_single_word_unknown_casual(self):
+        """Random single word should be casual."""
+        from main import is_casual_message
+        assert is_casual_message("lol") is True
+
+    def test_url_never_casual(self):
+        """URLs should never be casual."""
+        from main import is_casual_message
+        assert is_casual_message("https://example.com") is False
+
+
+# ============================================================
+# BUG FIX 23: Dead Archivist class removed
+# ============================================================
+class TestArchivistCleanup:
+    """Bug: archivist.py had dead class-based Archivist.execute() that was
+    never called because worker prefers module-level execute(). Removed."""
+
+    def test_no_archivist_class(self):
+        """Archivist module should not have a class-based Archivist."""
+        import agents.archivist as archivist
+        assert not hasattr(archivist, 'Archivist'), \
+            "Dead Archivist class should be removed"
+
+    def test_module_execute_exists(self):
+        """Module-level execute() should exist."""
+        import agents.archivist as archivist
+        assert hasattr(archivist, 'execute')
+        assert callable(archivist.execute)
+
+
+# ============================================================
+# ARCHITECTURE FIX: Deterministic routing (no LLM)
+# ============================================================
+class TestDeterministicRouting:
+    """Routing no longer uses LLM call. Pure regex/keyword matching."""
+
+    def test_route_deterministic_exists(self):
+        from main import route_deterministic
+        assert callable(route_deterministic)
+
+    def test_route_intent_removed(self):
+        """route_intent (LLM-based) should no longer exist."""
+        import main
+        assert not hasattr(main, 'route_intent'), \
+            "LLM-based route_intent should be replaced by route_deterministic"
+
+    def test_urls_route_to_content_saver(self):
+        from main import route_deterministic
+        assert route_deterministic("https://example.com") == "content_saver"
+        assert route_deterministic("save https://youtube.com/watch?v=abc") == "content_saver"
+
+    def test_save_routes_to_archivist(self):
+        from main import route_deterministic
+        assert route_deterministic("save this: AI is great") == "archivist"
+        assert route_deterministic("remember that meeting is at 3pm") == "archivist"
+
+    def test_research_routes_to_researcher(self):
+        from main import route_deterministic
+        assert route_deterministic("research quantum computing") == "researcher"
+        assert route_deterministic("look up Python tutorials") == "researcher"
+
+    def test_questions_route_to_researcher(self):
+        from main import route_deterministic
+        assert route_deterministic("what is machine learning?") == "researcher"
+        assert route_deterministic("how does TCP work?") == "researcher"
+
+    def test_kb_queries_route_to_archivist(self):
+        from main import route_deterministic
+        assert route_deterministic("what did I save about Python?") == "archivist"
+        assert route_deterministic("search my brain for AI") == "archivist"
+
+    def test_write_routes_to_writer(self):
+        from main import route_deterministic
+        assert route_deterministic("write an email to my boss") == "writer"
+        assert route_deterministic("draft a report on Q4") == "writer"
+
+    def test_code_routes_to_coder(self):
+        from main import route_deterministic
+        assert route_deterministic("create a data model for sales") == "coder"
+        assert route_deterministic("build a REST API project") == "coder"
+
+    def test_returns_string_not_dict(self):
+        """route_deterministic returns agent name string, not a dict with payload."""
+        from main import route_deterministic
+        result = route_deterministic("save this note")
+        assert isinstance(result, str)
+
+
+# ============================================================
+# ARCHITECTURE FIX: Direct save in archivist (no LLM tool gamble)
+# ============================================================
+class TestDirectSave:
+    """Archivist save path now calls db.add_knowledge() directly."""
+
+    def test_strip_save_prefix(self):
+        from agents.archivist import _strip_save_prefix
+        assert _strip_save_prefix("save this: AI is great") == "AI is great"
+        assert _strip_save_prefix("remember that meeting at 3") == "meeting at 3"
+        assert _strip_save_prefix("note: buy groceries") == "buy groceries"
+        # No prefix → returns original
+        assert _strip_save_prefix("plain text without prefix") == "plain text without prefix"
+
+    def test_extract_tags(self):
+        from agents.archivist import _extract_tags
+        tags = _extract_tags("Machine learning is transforming healthcare")
+        assert len(tags) > 0
+        assert len(tags) <= 5
+        assert "machine" in tags
+        # Stop words should be excluded
+        assert "is" not in tags
+        assert "the" not in tags
+
+    def test_extract_tags_returns_at_least_general(self):
+        from agents.archivist import _extract_tags
+        tags = _extract_tags("a b c")  # All stop words / too short
+        assert tags == ["general"]
+
+    def test_save_path_no_llm_agent_run(self):
+        """Archivist execute() save path should NOT call archivist_agent.run()."""
+        import inspect
+        from agents.archivist import execute
+        source = inspect.getsource(execute)
+        # The save branch should use db.add_knowledge directly
+        assert "db.add_knowledge" in source
+        # Should NOT rely on LLM agent for saving
+        assert 'archivist_agent.run(f"Save' not in source
+
+
+# ============================================================
+# ARCHITECTURE FIX: Direct search + synthesis in researcher
+# ============================================================
+class TestDirectResearch:
+    """Researcher now calls search_brain and search_web directly."""
+
+    def test_researcher_has_direct_search_functions(self):
+        import agents.researcher as r
+        assert hasattr(r, '_search_brain_direct')
+        assert hasattr(r, '_search_web_direct')
+        assert callable(r._search_brain_direct)
+        assert callable(r._search_web_direct)
+
+    def test_researcher_has_synthesis(self):
+        import agents.researcher as r
+        assert hasattr(r, '_synthesize_answer')
+        assert hasattr(r, '_format_raw_results')
+
+    def test_researcher_no_agent_run(self):
+        """Researcher execute() should NOT call researcher_agent.run()."""
+        import inspect
+        import agents.researcher as r
+        source = inspect.getsource(r.execute)
+        assert "researcher_agent.run" not in source
+        # Should call direct search functions
+        assert "_search_brain_direct" in source
+        assert "_search_web_direct" in source
+
+    def test_format_raw_results_no_results(self):
+        from agents.researcher import _format_raw_results
+        output = _format_raw_results("test topic", [], [])
+        assert "couldn't find" in output.lower()
+
+    def test_format_raw_results_brain_only(self):
+        from agents.researcher import _format_raw_results
+        brain = [{"title": "My Note", "content": "Some content about AI"}]
+        output = _format_raw_results("AI", brain, [])
+        assert "knowledge base" in output.lower()
+        assert "My Note" in output
+
+    def test_format_raw_results_web_only(self):
+        from agents.researcher import _format_raw_results
+        web = [{"title": "Web Article", "body": "AI is advancing", "href": "https://example.com"}]
+        output = _format_raw_results("AI", [], web)
+        assert "web" in output.lower()
+        assert "Web Article" in output
+
+
+# ============================================================
+# ARCHITECTURE FIX: Direct extraction + save in content_saver
+# ============================================================
+class TestDirectContentSaver:
+    """Content saver now extracts and saves directly, no LLM tool calling."""
+
+    def test_content_saver_has_standalone_extractors(self):
+        import agents.content_saver as cs
+        assert hasattr(cs, '_extract_webpage_content')
+        assert hasattr(cs, '_extract_tweet_content')
+        assert hasattr(cs, '_extract_youtube_content')
+
+    def test_content_saver_has_direct_save(self):
+        import agents.content_saver as cs
+        assert hasattr(cs, '_save_content_to_db')
+
+    def test_content_saver_no_agent_run(self):
+        """execute() should NOT call content_saver_agent.run()."""
+        import inspect
+        import agents.content_saver as cs
+        source = inspect.getsource(cs.execute)
+        assert "content_saver_agent.run" not in source
+
+    def test_auto_tags_youtube(self):
+        from agents.content_saver import _auto_tags
+        tags = _auto_tags("Video about machine learning", "https://youtube.com/watch?v=abc")
+        assert "youtube" in tags
+        assert "saved-content" in tags
+
+    def test_auto_tags_tweet(self):
+        from agents.content_saver import _auto_tags
+        tags = _auto_tags("Tweet about AI policy", "https://twitter.com/user/status/123")
+        assert "tweet" in tags
+
+    def test_auto_tags_webpage(self):
+        from agents.content_saver import _auto_tags
+        tags = _auto_tags("Article content", "https://example.com/article")
+        assert "saved-content" in tags
+
+    def test_extract_title_from_content(self):
+        from agents.content_saver import _extract_title_from_content
+        title = _extract_title_from_content("Title: My Great Article\n\nContent here", "https://example.com")
+        assert title == "My Great Article"
+
+    def test_extract_title_fallback(self):
+        from agents.content_saver import _extract_title_from_content
+        title = _extract_title_from_content("Some random content\nmore text", "https://example.com")
+        assert title == "Some random content"
+
+    def test_is_extraction_error(self):
+        from agents.content_saver import _is_extraction_error
+        assert _is_extraction_error("Error extracting webpage: timeout") is True
+        assert _is_extraction_error("Invalid YouTube URL format") is True
+        assert _is_extraction_error("Title: Great Article\n\nContent...") is False
+
+    def test_content_type_detection(self):
+        from agents.content_saver import _content_type
+        assert _content_type("https://youtube.com/watch?v=abc") == "youtube"
+        assert _content_type("https://twitter.com/user/status/123") == "tweet"
+        assert _content_type("https://example.com/article") == "webpage"
+
+
+# ============================================================
+# ARCHITECTURE: Payload always includes text
+# ============================================================
+class TestPayloadIntegrity:
+    """Payload should ALWAYS include original user text."""
+
+    def test_handle_message_always_sets_text(self):
+        """handle_message should build payload with text field."""
+        import inspect
+        with open("main.py") as f:
+            source = f.read()
+        # Should create payload with text
+        assert 'payload = {"text": text}' in source
 
 
 if __name__ == "__main__":

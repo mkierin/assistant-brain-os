@@ -273,13 +273,15 @@ async def search_knowledge(ctx: RunContext[None], query: str) -> str:
         return f"Error searching knowledge base: {str(e)}"
 
 
-async def execute(topic: str) -> AgentResponse:
+async def execute(payload) -> AgentResponse:
     """
     Main execution function for the coding agent.
     Generates a complete project based on the given task description.
+    Accepts full payload dict or plain string.
     """
     global _project_writer, _plan_steps
 
+    topic = payload.get("text", "") if isinstance(payload, dict) else payload
     print(f"🛠️ Coding Agent activated for: {topic}")
 
     # Reset state for this execution

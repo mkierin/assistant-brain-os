@@ -115,8 +115,9 @@ def is_casual_message(text: str) -> bool:
     if text_lower in CASUAL_PATTERNS:
         return True
 
-    # Very short messages (1-2 words) without action keywords are likely casual
-    if len(text.split()) <= 2:
+    # Single-word messages without action keywords are likely casual
+    # (2-word messages like "Docker help" or "search Python" should be routed)
+    if len(text.split()) == 1:
         return True
 
     return False
@@ -201,28 +202,84 @@ Use the menu button or type:
 """
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
-async def route_intent(text: str) -> dict:
-    prompt = f"""Analyze this user request and route it to the correct agent.
-Available agents:
-- content_saver: For saving URLs including YouTube videos, web articles, tweets, and links. ALWAYS use this for ANY URL (youtube.com, youtu.be, twitter.com, x.com, http://, https://). Extracts content and builds knowledge graph.
-- archivist: For saving plain text information, thoughts, or searching existing knowledge (NO URLs).
-- researcher: For simple web searches and quick lookups when user asks a question (NO URLs).
-- writer: For formatting content, drafting emails, or writing reports.
-- coder: For code generation, building projects, creating data models, scaffolding, and any task that produces code files. Keywords: create, build, generate, code, design, model, scaffold, implement, develop, architecture.
+def route_deterministic(text: str) -> str:
+    """Route user message to the correct agent using pattern matching. No LLM call.
 
-IMPORTANT: If the text contains ANY URL, route to content_saver.
+    Returns agent name string. Fast, reliable, zero network calls.
+    """
+    text_lower = text.lower().strip()
 
-User Request: {text}
+    # 1. URLs → content_saver (already handled upstream, but double-check)
+    if re.search(r'https?://', text_lower):
+        return "content_saver"
 
-Return JSON: {{"agent": "agent_name", "payload": {{...}}}}"""
-    
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "system", "content": "You are a routing system. Return ONLY JSON."},
-                  {"role": "user", "content": prompt}],
-        response_format={"type": "json_object"}
-    )
-    return json.loads(response.choices[0].message.content)
+    # 2. Code generation keywords
+    code_patterns = [
+        r'\b(create|build|generate|scaffold|implement)\b.*\b(project|app|code|script|model|schema|api)\b',
+        r'\b(code|program|develop)\b',
+        r'\bdata\s+model\b', r'\bstar\s+schema\b', r'\bload\s+script\b',
+    ]
+    for pattern in code_patterns:
+        if re.search(pattern, text_lower):
+            return "coder"
+
+    # 3. Writing/formatting keywords
+    write_patterns = [
+        r'\b(write|draft|compose)\b.*\b(email|letter|report|message|post|article|essay)\b',
+        r'\b(format|reformat|rewrite)\b',
+        r'\bdraft\s+(a|an|the|me)\b',
+    ]
+    for pattern in write_patterns:
+        if re.search(pattern, text_lower):
+            return "writer"
+
+    # 4. Explicit research / web lookup
+    research_patterns = [
+        r'\bresearch\b', r'\binvestigate\b',
+        r'\blook\s*up\b', r'\bsearch\s+the\s+web\b',
+        r'\bgoogle\b', r'\bweb\s+search\b',
+    ]
+    for pattern in research_patterns:
+        if re.search(pattern, text_lower):
+            return "researcher"
+
+    # 5. Explicit save/store intent → archivist
+    save_patterns = [
+        r'\bsave\b', r'\bremember\b', r'\bstore\b',
+        r'\bnote\s*(this|that|:)\b', r'\bkeep\s*(this|that)\b',
+        r'\badd\s*(this|that|to)\b',
+    ]
+    for pattern in save_patterns:
+        if re.search(pattern, text_lower):
+            return "archivist"
+
+    # 6. Explicit knowledge base search → archivist
+    kb_patterns = [
+        r'\b(my|your)\s+(notes?|knowledge|brain|saved|entries)\b',
+        r'\bwhat\s+(did|do)\s+(i|we|you)\s+(save|have|know)\b',
+        r'\bsearch\s+(my|the)\s+(brain|knowledge|notes)\b',
+        r'\bfind\s+(my|in\s+my)\b',
+    ]
+    for pattern in kb_patterns:
+        if re.search(pattern, text_lower):
+            return "archivist"
+
+    # 7. General questions → researcher (it checks brain first, then web)
+    question_patterns = [
+        r'^(what|where|when|who|how|why|which|is|are|was|were|can|could|do|does|did|will|would|should)\b',
+        r'\?$',
+        r'\b(explain|tell\s+me|describe)\b',
+    ]
+    for pattern in question_patterns:
+        if re.search(pattern, text_lower):
+            return "researcher"
+
+    # 8. Short messages without clear intent → archivist (search mode)
+    if len(text.split()) <= 5:
+        return "archivist"
+
+    # 9. Default: longer text is probably something to save
+    return "archivist"
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Detailed help and examples"""
@@ -643,6 +700,57 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Note: You can only clear your own failed jobs. Contact admin for full queue clear."
     )
 
+async def issues_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show recent unfulfilled requests."""
+    try:
+        from common.goal_tracker import GoalTracker
+        from common.database import db
+        tracker = GoalTracker(db.conn, r)
+        issues = tracker.get_recent_issues(limit=5)
+
+        if not issues:
+            await update.message.reply_text("No recent issues - everything is working!")
+            return
+
+        text = "Recent Unfulfilled Requests:\n\n"
+        for i, issue in enumerate(issues, 1):
+            text += f"{i}. [{issue['issue_type']}] {issue['user_input'][:80]}\n"
+            text += f"   Agent: {issue['agent']} | {issue['created_at'][:10]}\n"
+            text += f"   Reason: {issue['fulfillment_reason']}\n\n"
+
+        await update.message.reply_text(text)
+    except Exception as e:
+        await update.message.reply_text(f"Error loading issues: {str(e)}")
+
+
+async def fulfillment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show fulfillment rate statistics."""
+    try:
+        from common.goal_tracker import GoalTracker
+        from common.database import db
+        tracker = GoalTracker(db.conn, r)
+        stats = tracker.get_stats(days=7)
+
+        text = f"Goal Fulfillment (Last 7 Days)\n\n"
+        text += f"Total requests: {stats['total']}\n"
+        text += f"Fulfilled: {stats['fulfilled']} ({stats['fulfillment_rate']:.0%})\n"
+        text += f"Unfulfilled: {stats['unfulfilled']}\n\n"
+
+        if stats['per_agent']:
+            text += "Per Agent:\n"
+            for agent, agent_stats in stats['per_agent'].items():
+                text += f"  {agent}: {agent_stats['fulfilled']}/{agent_stats['total']} ({agent_stats['rate']:.0%})\n"
+
+        if stats['common_issues']:
+            text += "\nCommon Issues:\n"
+            for issue_type, count in stats['common_issues'].items():
+                text += f"  {issue_type}: {count}\n"
+
+        await update.message.reply_text(text)
+    except Exception as e:
+        await update.message.reply_text(f"Error loading stats: {str(e)}")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming text and voice messages with smart routing and feedback"""
     user_id = update.effective_user.id
@@ -702,26 +810,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     thinking_msg = await update.message.reply_text(random.choice(THINKING_MESSAGES))
 
     try:
-        # Direct URL detection (faster and more reliable than LLM routing)
-        url_pattern = r'https?://[^\s]+'
-        if re.search(url_pattern, text, re.IGNORECASE):
-            # Any URL goes to content_saver
-            print(f"🔍 URL detected: {text[:50]}... -> routing to content_saver")
-            agent = "content_saver"
-            payload = {"text": text}
-        # Determine agent and what will happen
+        # Determine agent — deterministic routing, no LLM call
+        if settings['default_agent'] not in ('auto', 'archivist', 'researcher', 'writer', 'coder', 'content_saver'):
+            agent = route_deterministic(text)
         elif settings['auto_route'] or settings['default_agent'] == 'auto':
-            # Route intent using LLM
-            routing = await route_intent(text)
-            agent = routing.get("agent", "archivist")
-            payload = routing.get("payload", {"text": text})
+            agent = route_deterministic(text)
         else:
-            # Use default agent
             agent = settings['default_agent']
-            payload = {"text": text}
 
+        print(f"🔀 Routed to: {agent} | Text: {text[:60]}")
+
+        # Build payload — ALWAYS include original text
+        payload = {"text": text}
         payload["source"] = "telegram"
         payload["user_id"] = user_id
+
+        # Classify goal for tracking
+        from common.goal_tracker import GoalTracker
+        payload["goal_type"] = GoalTracker.classify_goal(agent, text)
 
         # Natural acknowledgment messages based on agent type
         natural_responses = {
@@ -799,6 +905,8 @@ async def setup_bot_menu(application: Application):
         BotCommand("monitor", "🔍 Real-time agent activity"),
         BotCommand("agents", "🤖 Learn about agents"),
         BotCommand("queue", "📋 View pending jobs"),
+        BotCommand("issues", "🐛 View unfulfilled requests"),
+        BotCommand("fulfillment", "📈 Goal fulfillment stats"),
     ]
 
     await application.bot.set_my_commands(commands)
@@ -822,6 +930,8 @@ def main():
     application.add_handler(CommandHandler("agents", agents_command))
     application.add_handler(CommandHandler("queue", queue_command))
     application.add_handler(CommandHandler("clear", clear_command))
+    application.add_handler(CommandHandler("issues", issues_command))
+    application.add_handler(CommandHandler("fulfillment", fulfillment_command))
 
     # Callback query handler for settings buttons
     application.add_handler(CallbackQueryHandler(settings_callback))

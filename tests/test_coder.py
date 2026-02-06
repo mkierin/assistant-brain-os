@@ -127,12 +127,12 @@ class TestCoderAgentImport:
         assert hasattr(coder, 'search_knowledge')
 
     def test_coder_execute_signature(self):
-        """execute() should accept a topic string."""
+        """execute() should accept a payload (dict or string)."""
         import inspect
         import agents.coder as coder
         sig = inspect.signature(coder.execute)
         params = list(sig.parameters.keys())
-        assert "topic" in params
+        assert "payload" in params
 
 
 # ============================================================

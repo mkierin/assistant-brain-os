@@ -8,9 +8,20 @@ from telegram import Bot
 from telegram.error import BadRequest
 from common.config import REDIS_URL, TASK_QUEUE, TELEGRAM_TOKEN
 from common.contracts import Job, JobStatus, AgentResponse, FailureDetail
+from common.goal_tracker import GoalTracker
 
 r = redis.from_url(REDIS_URL)
 bot = Bot(token=TELEGRAM_TOKEN)
+
+# Goal tracker singleton (lazy init)
+_goal_tracker = None
+
+def get_goal_tracker():
+    global _goal_tracker
+    if _goal_tracker is None:
+        from common.database import db
+        _goal_tracker = GoalTracker(db.conn, r)
+    return _goal_tracker
 
 # Telegram message length limit
 TELEGRAM_MAX_LENGTH = 4096
@@ -79,21 +90,31 @@ async def process_job(job_data: str):
     }
     r.setex(f"job:processing:{job.id}", 300, json.dumps(job_info))  # Expire after 5 min
 
-    print(f"🔄 Processing Job: {job.id} | Agent: {job.current_agent} | User: {job.payload.get('user_id')}")
-    
+    # Record goal for tracking
+    tracker = get_goal_tracker()
+    goal_type = job.payload.get("goal_type", "UNKNOWN")
+    tracker.record_goal(
+        job_id=str(job.id),
+        user_id=str(job.payload.get("user_id", "")),
+        source=job.payload.get("source", "telegram"),
+        goal_type=goal_type,
+        agent=job.current_agent,
+        user_input=job.payload.get("text", "")[:500]
+    )
+
+    print(f"🔄 Processing Job: {job.id} | Agent: {job.current_agent} | Goal: {goal_type} | User: {job.payload.get('user_id')}")
+
     try:
         # Dynamically load agent
         agent_module = importlib.import_module(f"agents.{job.current_agent}")
 
-        # Check if agent has a module-level execute function (new pattern)
+        # Check if agent has a module-level execute function
         if hasattr(agent_module, 'execute'):
-            # New pattern: module-level execute function
             execute_func = getattr(agent_module, 'execute')
-            # Pass the text from payload
-            text = job.payload.get("text", "")
-            response: AgentResponse = await execute_func(text)
+            # Pass full payload so agents have access to user_id, source, etc.
+            response: AgentResponse = await execute_func(job.payload)
         else:
-            # Old pattern: class-based agent
+            # Fallback: class-based agent
             agent_class_name = job.current_agent.capitalize()
             agent_class = getattr(agent_module, agent_class_name)
             agent_instance = agent_class()
@@ -119,6 +140,14 @@ async def process_job(job_data: str):
             r.delete(f"job:processing:{job.id}")
 
             print(f"✅ Job {job.id} completed | Agent: {job.current_agent} | Duration: {duration}s | Output: {len(response.output)} chars")
+
+            # Evaluate goal fulfillment
+            tracker.evaluate_and_record(
+                job_id=str(job.id),
+                agent_response=response,
+                duration=duration,
+                retry_count=job.retry_count
+            )
 
             # Send result to the appropriate channel based on source
             user_id = job.payload.get("user_id")
@@ -186,6 +215,14 @@ async def process_job(job_data: str):
             print(f"♻️  Retrying job {job.id} (attempt {job.retry_count + 1}/{job.max_retries})")
             r.lpush(TASK_QUEUE, job.model_dump_json())
         else:
+            # Record goal as unfulfilled at max retries
+            tracker.evaluate_and_record(
+                job_id=str(job.id),
+                agent_response=AgentResponse(success=False, output="", error=str(e)),
+                duration=int(time.time() - start_time),
+                retry_count=job.retry_count
+            )
+
             # 🚁 RESCUE MODE - Dispatch to AI-powered rescue agent
             job.status = JobStatus.WAITING_HUMAN
             print(f"🚨 Job {job.id} failed {job.max_retries} times - Dispatching Rescue Agent...")
