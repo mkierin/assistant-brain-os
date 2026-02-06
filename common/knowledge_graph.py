@@ -342,15 +342,20 @@ class KnowledgeGraph:
 
         # Get all incoming edges (predecessors)
         for predecessor in self.graph.predecessors(node_id):
-            # Get edge data
-            edge_data = self.graph.get_edge_data(predecessor, node_id)
+            # MultiDiGraph.get_edge_data returns {edge_key: {attrs}} dict
+            edge_data_dict = self.graph.get_edge_data(predecessor, node_id)
+            # Get relationship from the first edge between these nodes
+            relationship = 'unknown'
+            if edge_data_dict:
+                first_edge = next(iter(edge_data_dict.values()))
+                relationship = first_edge.get('relationship', 'unknown')
 
             node_data = self.graph.nodes[predecessor]
 
             backlinks.append({
                 'id': predecessor,
                 'title': node_data.get('title', 'Untitled'),
-                'relationship': edge_data.get('relationship', 'unknown'),
+                'relationship': relationship,
                 'created_at': node_data.get('created_at'),
                 'content_preview': node_data.get('content', '')[:200],
                 'tags': node_data.get('tags', [])

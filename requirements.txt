@@ -18,3 +18,4 @@ networkx
 rank-bm25
 youtube-transcript-api
 yt-dlp
+pyyaml

@@ -99,17 +99,24 @@ def is_casual_message(text: str) -> bool:
         print(f"🔗 URL detected in is_casual_message, marking as actionable")
         return False
 
-    # Check exact matches
+    # Action keywords override any casual pattern match
+    action_keywords = [
+        "save", "search", "research", "write", "find", "tell", "show",
+        "what", "how", "why", "when", "where", "who", "explain",
+        "summarize", "draft", "format", "help", "look up", "investigate",
+        "remember", "note", "store", "browse", "analyze",
+        "create", "build", "generate", "code", "design", "model",
+        "scaffold", "implement", "develop", "architecture"
+    ]
+    if any(keyword in text_lower for keyword in action_keywords):
+        return False
+
+    # Check exact matches only (no startswith - too many false positives)
     if text_lower in CASUAL_PATTERNS:
         return True
 
-    # Check if message starts with casual pattern
-    for pattern in CASUAL_PATTERNS:
-        if text_lower.startswith(pattern):
-            return True
-
-    # Very short messages without keywords are likely casual
-    if len(text.split()) <= 2 and not any(keyword in text_lower for keyword in ["save", "search", "research", "write", "find", "tell", "show", "what", "how", "why", "when"]):
+    # Very short messages (1-2 words) without action keywords are likely casual
+    if len(text.split()) <= 2:
         return True
 
     return False
@@ -201,6 +208,7 @@ Available agents:
 - archivist: For saving plain text information, thoughts, or searching existing knowledge (NO URLs).
 - researcher: For simple web searches and quick lookups when user asks a question (NO URLs).
 - writer: For formatting content, drafting emails, or writing reports.
+- coder: For code generation, building projects, creating data models, scaffolding, and any task that produces code files. Keywords: create, build, generate, code, design, model, scaffold, implement, develop, architecture.
 
 IMPORTANT: If the text contains ANY URL, route to content_saver.
 
@@ -412,7 +420,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_text = f"""📊 **System Status**
 
 **Backend Services:**
-🔴 Redis: {redis_status}
+{'🟢' if r.ping() else '🔴'} Redis: {redis_status}
 📦 Queue Size: {queue_size} jobs
 
 **Your Settings:**
@@ -496,6 +504,30 @@ async def agents_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • "Format this as a report"
 • "Draft a professional message about..."
 • "Help me write a summary"
+
+---
+
+**🛠️ CODER**
+*Your Code Generator*
+
+**What it does:**
+• Generates complete projects from skill templates
+• Builds data models, load scripts, and configurations
+• Creates documentation alongside code
+• Uses domain-specific best practices
+
+**Tools:**
+• find_skills() - Discover relevant skill files
+• load_skill() - Read templates and patterns
+• create_plan() - Plan the execution steps
+• write_file() - Generate project files
+• write_summary() - Finalize with README
+• search_knowledge() - Check existing context
+
+**Example requests:**
+• "Create a Qlik data model for e-commerce"
+• "Build a star schema for sales analytics"
+• "Generate incremental load scripts for orders"
 
 ---
 
@@ -723,6 +755,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Let me draft something for you.",
                 "I can help format that.",
                 "I'll work on that for you!"
+            ],
+            "coder": [
+                "I'll build that for you! Setting up the project now...",
+                "On it! Let me find the right skills and generate the code.",
+                "Starting the coding agent - I'll create all the files for you.",
+                "Let me architect and code that up for you!"
             ]
         }
 
@@ -769,8 +807,11 @@ async def setup_bot_menu(application: Application):
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Set up bot menu
-    asyncio.get_event_loop().run_until_complete(setup_bot_menu(application))
+    # Set up bot menu via post_init hook (avoids deprecated event loop usage)
+    async def post_init(app):
+        await setup_bot_menu(app)
+
+    application.post_init = post_init
 
     # Command handlers
     application.add_handler(CommandHandler("start", start))

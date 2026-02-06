@@ -74,6 +74,31 @@ class RescueDiagnosis(BaseModel):
     explanation: str
     pr_summary: Optional[str] = None
 
+class SkillMeta(BaseModel):
+    """Metadata parsed from skill file YAML frontmatter"""
+    name: str
+    domain: str
+    version: str = "1.0"
+    description: str = ""
+    tags: List[str] = []
+    keywords: List[str] = []
+    output_types: List[str] = []
+    author: str = ""
+    file_path: str = ""
+
+class Skill(BaseModel):
+    """Complete skill: metadata + body content"""
+    meta: SkillMeta
+    body: str
+
+class ProjectManifest(BaseModel):
+    """Manifest of all files generated for a coding project"""
+    project_id: str
+    task: str = ""
+    files: List[Dict[str, Any]] = []
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+    completed_at: Optional[str] = None
+
 class PRIssueSummary(BaseModel):
     """PR-ready issue report"""
     issue_id: str

@@ -120,17 +120,37 @@ async def process_job(job_data: str):
 
             print(f"✅ Job {job.id} completed | Agent: {job.current_agent} | Duration: {duration}s | Output: {len(response.output)} chars")
 
-            # Send result directly (no "Task Completed" prefix - just natural output)
-            # Handles long messages by splitting into chunks
+            # Send result to the appropriate channel based on source
             user_id = job.payload.get("user_id")
+            source = job.payload.get("source", "telegram")
+
             if user_id:
-                try:
-                    await send_long_message(chat_id=user_id, text=response.output)
-                except Exception as send_error:
-                    print(f"❌ Error sending message: {send_error}")
-                    # Fallback: send truncated message
-                    truncated = response.output[:TELEGRAM_MAX_LENGTH-100] + "\n\n...(message truncated - too long)"
-                    await bot.send_message(chat_id=user_id, text=truncated)
+                if source == "web":
+                    # Web users: push response to Redis for polling
+                    web_response = json.dumps({
+                        "id": str(job.id),
+                        "message": response.output,
+                        "sender": "bot",
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    response_key = f"web_response:{user_id}"
+                    r.lpush(response_key, web_response)
+                    r.expire(response_key, 3600)  # Keep for 1 hour
+
+                    # Also store in conversation history
+                    conv_key = f"web_conversation:{user_id}"
+                    r.lpush(conv_key, web_response)
+                    r.expire(conv_key, 86400)
+                    print(f"📤 Web response queued for {user_id}")
+                else:
+                    # Telegram users: send message directly
+                    try:
+                        await send_long_message(chat_id=user_id, text=response.output)
+                    except Exception as send_error:
+                        print(f"❌ Error sending message: {send_error}")
+                        # Fallback: send truncated message
+                        truncated = response.output[:TELEGRAM_MAX_LENGTH-100] + "\n\n...(message truncated - too long)"
+                        await bot.send_message(chat_id=user_id, text=truncated)
                 
             # Chain next agent if specified
             if response.next_agent:

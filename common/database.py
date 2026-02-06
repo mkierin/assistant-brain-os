@@ -5,6 +5,7 @@ from .config import DATABASE_PATH, CHROMA_PATH, OPENAI_API_KEY
 from .contracts import KnowledgeEntry
 import json
 import os
+import uuid
 import httpx
 from typing import List, Dict, Optional
 from rank_bm25 import BM25Okapi
@@ -79,11 +80,14 @@ class Database:
             entry: KnowledgeEntry to add
             use_contextual: If True, prepend context before embedding (improves accuracy)
         """
+        # Generate a stable unique ID if not provided
+        entry_id = entry.embedding_id or str(uuid.uuid4())
+
         # Add to SQLite (store original text)
         self.cursor.execute(
             "INSERT INTO knowledge (id, text, tags, source, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (
-                entry.embedding_id or entry.text[:50], # fallback ID
+                entry_id,
                 entry.text,
                 json.dumps(entry.tags),
                 entry.source,
@@ -99,7 +103,7 @@ class Database:
         self.collection.add(
             documents=[text_to_embed],
             metadatas=[{**entry.metadata, "source": entry.source, "tags": ",".join(entry.tags)}],
-            ids=[entry.embedding_id or str(hash(entry.text))]
+            ids=[entry_id]
         )
 
     async def _rerank_results(self, query: str, documents: List[str]) -> List[Dict]:
@@ -153,21 +157,8 @@ class Database:
         if not rerank or not results['documents'][0]:
             return results
 
-        # Rerank results synchronously using asyncio
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If we're already in an async context, we can't use run()
-                # Just return without reranking in this case
-                return results
-            else:
-                reranked = loop.run_until_complete(
-                    self._rerank_results(query, results['documents'][0])
-                )
-        except Exception:
-            # Fallback: return without reranking
-            return results
+        # Rerank using synchronous HTTP call (works in any context)
+        reranked = self._rerank_results_sync(query, results['documents'][0])
 
         if not reranked:
             return results
@@ -195,6 +186,34 @@ class Database:
             'distances': [reranked_distances] if reranked_distances else results.get('distances'),
             'ids': [reranked_ids] if reranked_ids else results.get('ids')
         }
+
+    def _rerank_results_sync(self, query: str, documents: List[str]) -> List[Dict]:
+        """
+        Rerank results using Jina AI's reranker API (synchronous version).
+        Works in both sync and async contexts.
+        """
+        try:
+            import httpx as httpx_sync
+            with httpx_sync.Client(timeout=10.0) as client:
+                response = client.post(
+                    'https://api.jina.ai/v1/rerank',
+                    headers={'Content-Type': 'application/json'},
+                    json={
+                        'model': 'jina-reranker-v2-base-multilingual',
+                        'query': query,
+                        'documents': documents,
+                        'top_n': len(documents)
+                    }
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    return data.get('results', [])
+                else:
+                    print(f"⚠️  Reranker API error: {response.status_code}")
+                    return []
+        except Exception as e:
+            print(f"⚠️  Reranking failed: {e}")
+            return []
 
     def hybrid_search(self, query: str, limit: int = 5, keyword_weight: float = 0.3, semantic_weight: float = 0.7):
         """
@@ -378,6 +397,148 @@ class Database:
             'distances': [filtered_distances]
         }
 
+    def search_clean(self, query: str, limit: int = 5) -> List[Dict]:
+        """
+        Search the knowledge base and return clean, display-ready results.
+
+        Uses hybrid search (BM25 + semantic) for best accuracy, then looks up
+        the original text from SQLite (not the contextualized ChromaDB text).
+
+        Returns a list of dicts with: id, title, content, tags, source, score, created_at
+        """
+        # Step 1: Hybrid search to get ranked IDs
+        try:
+            search_results = self.hybrid_search(query, limit=limit)
+        except Exception as e:
+            print(f"Hybrid search failed, falling back to semantic: {e}")
+            search_results = self.search_knowledge(query, limit=limit)
+
+        result_ids = search_results.get('ids', [[]])[0]
+        if not result_ids:
+            # Fallback: try SQLite LIKE search for exact keyword matches
+            return self._sqlite_fallback_search(query, limit)
+
+        # Step 2: Look up original clean text from SQLite by IDs
+        clean_results = []
+        for doc_id in result_ids:
+            self.cursor.execute(
+                "SELECT id, text, tags, source, metadata, created_at FROM knowledge WHERE id = ?",
+                (doc_id,)
+            )
+            row = self.cursor.fetchone()
+            if row:
+                meta = json.loads(row[4]) if row[4] else {}
+                text = row[1] or ""
+                # Extract title from text (first heading) or metadata
+                title = meta.get('title', '')
+                if not title and text.startswith('#'):
+                    title = text.split('\n')[0].strip('# ').strip()
+                if not title:
+                    title = text[:80].strip()
+
+                clean_results.append({
+                    'id': row[0],
+                    'title': title,
+                    'content': text,
+                    'tags': json.loads(row[2]) if row[2] else [],
+                    'source': row[3] or '',
+                    'url': meta.get('url', ''),
+                    'summary': meta.get('summary', ''),
+                    'created_at': row[5] or '',
+                })
+
+        # If hybrid search returned IDs that weren't in SQLite, try fallback
+        if not clean_results:
+            return self._sqlite_fallback_search(query, limit)
+
+        return clean_results
+
+    def _sqlite_fallback_search(self, query: str, limit: int = 5) -> List[Dict]:
+        """Fallback: simple LIKE search in SQLite for exact keyword matches."""
+        search_term = f"%{query}%"
+        self.cursor.execute(
+            "SELECT id, text, tags, source, metadata, created_at FROM knowledge WHERE text LIKE ? ORDER BY created_at DESC LIMIT ?",
+            (search_term, limit)
+        )
+        rows = self.cursor.fetchall()
+        results = []
+        for row in rows:
+            meta = json.loads(row[4]) if row[4] else {}
+            text = row[1] or ""
+            title = meta.get('title', '')
+            if not title and text.startswith('#'):
+                title = text.split('\n')[0].strip('# ').strip()
+            if not title:
+                title = text[:80].strip()
+
+            results.append({
+                'id': row[0],
+                'title': title,
+                'content': text,
+                'tags': json.loads(row[2]) if row[2] else [],
+                'source': row[3] or '',
+                'url': meta.get('url', ''),
+                'summary': meta.get('summary', ''),
+                'created_at': row[5] or '',
+            })
+        return results
+
+    def get_all_entries_count(self) -> int:
+        """Get total number of entries in the knowledge base."""
+        self.cursor.execute("SELECT COUNT(*) FROM knowledge")
+        return self.cursor.fetchone()[0]
+
+    def get_all_entries(self, limit: int = 1000) -> List[Dict]:
+        """Get all entries as a list of dicts (for web API endpoints)."""
+        self.cursor.execute(
+            "SELECT id, text, tags, source, metadata, created_at FROM knowledge ORDER BY created_at DESC LIMIT ?",
+            (limit,)
+        )
+        rows = self.cursor.fetchall()
+        entries = []
+        for row in rows:
+            meta = json.loads(row[4]) if row[4] else {}
+            entries.append({
+                'id': row[0],
+                'text': row[1],
+                'title': meta.get('title', row[1][:80] if row[1] else 'Untitled'),
+                'tags': json.loads(row[2]) if row[2] else [],
+                'source': row[3],
+                'metadata': meta,
+                'content': row[1],
+                'summary': meta.get('summary', ''),
+                'category': meta.get('content_type', 'note'),
+                'url': meta.get('url', ''),
+                'created_at': row[5]
+            })
+        return entries
+
+    def search_entries(self, query: str, limit: int = 50) -> List[Dict]:
+        """Search entries and return as a list of dicts (for web API endpoints)."""
+        if not query.strip():
+            return self.get_all_entries(limit=limit)
+
+        results = self.search_knowledge(query, limit=limit)
+        entries = []
+        if results['documents'] and results['documents'][0]:
+            for i, doc in enumerate(results['documents'][0]):
+                meta = results['metadatas'][0][i] if results['metadatas'] and results['metadatas'][0] else {}
+                doc_id = results['ids'][0][i] if results['ids'] and results['ids'][0] else str(i)
+                entries.append({
+                    'id': doc_id,
+                    'text': doc,
+                    'title': meta.get('title', doc[:80] if doc else 'Untitled'),
+                    'tags': meta.get('tags', '').split(',') if meta.get('tags') else [],
+                    'source': meta.get('source', ''),
+                    'metadata': meta,
+                    'content': doc,
+                    'summary': meta.get('summary', ''),
+                    'category': meta.get('content_type', 'note'),
+                    'url': meta.get('url', ''),
+                    'created_at': meta.get('saved_at', meta.get('created_at', ''))
+                })
+        return entries
+
     def get_recent_knowledge(self, limit: int = 5):
         self.cursor.execute("SELECT * FROM knowledge ORDER BY created_at DESC LIMIT ?", (limit,))
         rows = self.cursor.fetchall()
@@ -400,7 +561,7 @@ class Database:
             print(f"Warning: Could not delete from ChromaDB: {e}")
 
         # Delete from SQLite
-        self.cursor.execute("DELETE FROM knowledge WHERE embedding_id = ?", (entry_id,))
+        self.cursor.execute("DELETE FROM knowledge WHERE id = ?", (entry_id,))
         self.conn.commit()
 
 db = Database()

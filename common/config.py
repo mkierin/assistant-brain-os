@@ -15,3 +15,14 @@ CHROMA_PATH = os.getenv("CHROMA_PATH", "data/chroma")
 
 TASK_QUEUE = "task_queue"
 MAX_RETRIES = 3
+
+# Model name derived from provider
+if LLM_PROVIDER == "deepseek":
+    MODEL_NAME = "deepseek-chat"
+else:
+    MODEL_NAME = "gpt-4o-mini"
+
+# Coding agent configuration
+SKILLS_DIR = os.getenv("SKILLS_DIR", "skills")
+CODER_OUTPUT_DIR = os.getenv("CODER_OUTPUT_DIR", "output/projects")
+CODER_MODEL = os.getenv("CODER_MODEL", "gpt-4o")

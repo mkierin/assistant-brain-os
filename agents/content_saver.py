@@ -13,7 +13,6 @@ from typing import Optional, Dict, List
 from urllib.parse import urlparse
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
-from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 
 if LLM_PROVIDER == "deepseek":
     model = OpenAIModel('deepseek-chat', provider='deepseek')
@@ -436,15 +435,21 @@ Create a structured summary with:
 
 Format as clear sections with headers."""
 
-        # Use DeepSeek to summarize
+        # Use configured LLM provider to summarize
         from openai import AsyncOpenAI
-        llm_client = AsyncOpenAI(
-            api_key=DEEPSEEK_API_KEY,
-            base_url="https://api.deepseek.com"
-        )
+        from common.config import LLM_PROVIDER as _provider, OPENAI_API_KEY as _oai_key, MODEL_NAME as _model_name
+        if _provider == "deepseek":
+            llm_client = AsyncOpenAI(
+                api_key=DEEPSEEK_API_KEY,
+                base_url="https://api.deepseek.com"
+            )
+            summary_model = "deepseek-chat"
+        else:
+            llm_client = AsyncOpenAI(api_key=_oai_key)
+            summary_model = _model_name
 
         summary_response = await llm_client.chat.completions.create(
-            model="deepseek-chat",
+            model=summary_model,
             messages=[{"role": "user", "content": summary_prompt}],
             temperature=0.3
         )
@@ -610,22 +615,24 @@ async def remove_last_entry(ctx: RunContext[None]) -> str:
     Use when user says "delete that", "remove last one", "undo that", etc.
     """
     try:
-        # Get the most recent entry
-        results = db.search_knowledge("", limit=1, sort_by="created_at", sort_order="desc")
+        # Get the most recent entry from SQLite (ordered by created_at)
+        recent = db.get_recent_knowledge(limit=1)
 
-        if not results:
+        if not recent:
             return "Nothing to remove - your knowledge base is empty"
 
-        last_entry = results[0]
-        entry_id = last_entry.get('id')
-        title = last_entry.get('title', 'Untitled')
+        last_entry = recent[0]
+        entry_id = last_entry.embedding_id
+        title = last_entry.text[:80] if last_entry.text else 'Untitled'
 
-        # Remove from database
-        db.delete_entry(entry_id)
+        if entry_id:
+            # Remove from database
+            db.delete_entry(entry_id)
 
-        # Remove from knowledge graph
-        if knowledge_graph.graph.has_node(entry_id):
-            knowledge_graph.graph.remove_node(entry_id)
+            # Remove from knowledge graph
+            if knowledge_graph.graph.has_node(entry_id):
+                knowledge_graph.graph.remove_node(entry_id)
+                knowledge_graph._save_graph()
 
         return f"Removed: {title}\n\nAll gone!"
 
