@@ -1,8 +1,8 @@
 # 🏗️ Assistant Brain OS - System Architecture
 
-**Version**: 3.0 (Updated 2026-02-05)
+**Version**: 4.0 (Updated 2026-02-08)
 
-Complete architecture documentation including Obsidian-style knowledge graph, advanced retrieval, YouTube extraction, and self-healing rescue system.
+Complete architecture documentation including Obsidian-style knowledge graph, advanced retrieval, YouTube extraction, self-healing rescue system, journal agent, and task manager.
 
 ---
 
@@ -53,11 +53,16 @@ Complete architecture documentation including Obsidian-style knowledge graph, ad
 │  └─────────────┘  └─────────────┘  └─────────────┘           │
 │                                                                 │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐           │
-│  │   Writer    │  │   Rescue    │  │   Future    │           │
-│  │  (Content)  │  │   Agent     │  │   Agents    │           │
+│  │   Writer    │  │   Journal   │  │   Task Mgr  │           │
+│  │  (Content)  │  │   (Diary)   │  │  (Reminders)│           │
 │  └─────────────┘  └─────────────┘  └─────────────┘           │
 │                                                                 │
-│  - PydanticAI agents with tools                                 │
+│  ┌─────────────┐                                               │
+│  │   Rescue    │                                               │
+│  │   Agent     │                                               │
+│  └─────────────┘                                               │
+│                                                                 │
+│  - Deterministic agents (zero LLM) + LLM-assisted agents       │
 │  - Specialized capabilities                                     │
 │  - Self-healing on failures                                     │
 └────────────────┬────────────────────────────────────────────────┘
@@ -110,12 +115,12 @@ Complete architecture documentation including Obsidian-style knowledge graph, ad
 │                     Storage Layer                               │
 │                                                                 │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐        │
-│  │   ChromaDB   │  │  PostgreSQL  │  │    Redis     │        │
+│  │   ChromaDB   │  │   SQLite     │  │    Redis     │        │
 │  │  (Vectors)   │  │  (Metadata)  │  │  (Queue/KV)  │        │
 │  └──────────────┘  └──────────────┘  └──────────────┘        │
 │                                                                 │
 │  ChromaDB: Vector embeddings, semantic search                  │
-│  PostgreSQL: Structured data, metadata, relationships          │
+│  SQLite: Structured data, metadata, tasks, journal entries          │
 │  Redis: Task queue, caching, job tracking                      │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -129,29 +134,38 @@ Complete architecture documentation including Obsidian-style knowledge graph, ad
 **Responsibilities**:
 - Receive messages from Telegram
 - Classify message type (casual, actionable, URL)
-- Route to appropriate agent
+- Route to appropriate agent using **deterministic regex** (zero LLM)
 - Handle voice transcription (Whisper)
 - Provide user feedback
+- Run reminder scheduler (every 15 min)
 
 **Key Features**:
 - URL detection with regex: `r'https?://[^\s]+'`
-- Casual message detection (greetings, small talk)
-- Auto-routing vs manual agent selection
+- `route_deterministic()` — pure regex routing, 11 steps
+- Voice journal mode (auto-route voice → journal when enabled)
 - Thinking messages for UX
+- `/tasks` and `/journal` commands
 
 **Flow**:
 ```python
 1. Receive message
-2. Check if casual (is_casual_message)
+2. Check if voice + voice_journal setting
+   → If voice_journal ON: Route to journal agent
+3. Check if casual (is_casual_message)
    → If casual: Respond with AI chat
    → If actionable: Continue
-3. Detect URLs
+4. Detect URLs
    → If URL: Route to content_saver
-   → Else: Use LLM routing or default agent
-4. Create Job and queue in Redis
-5. Show thinking message
-6. Worker picks up and processes
-7. Send result back to user
+5. route_deterministic(text):
+   → "save/remember" → archivist
+   → "search/find" → archivist
+   → "journal:/diary:" → journal
+   → "remind me/todo" → task_manager
+   → Questions → researcher
+   → Default → researcher
+6. Create Job and queue in Redis
+7. Worker picks up and processes
+8. Send result back to user
 ```
 
 ### 2. Worker System (`worker.py`)
@@ -474,7 +488,45 @@ results = search_with_filters(
 - `format_markdown()` - Structure content
 - `add_metadata()` - Tags and links
 
-#### 5. Rescue Agent (`agents/rescue_agent.py`) ⭐ NEW
+#### 5. Journal Agent (`agents/journal.py`)
+
+**Purpose**: Voice & text journaling with auto-linking (zero LLM)
+
+**Flow**:
+```
+1. Strip journal prefix ("journal:", "diary:", etc.)
+2. Detect action (save vs view)
+3. For save:
+   a. Extract topics (keyword-based)
+   b. Detect mood (regex patterns)
+   c. Generate title (date + first sentence)
+   d. Save to SQLite + ChromaDB with content_type="journal"
+   e. Cross-link: search existing notes → create knowledge graph edges
+4. For view:
+   a. Query db.get_journal_entries(limit=7)
+   b. Format as numbered list
+```
+
+#### 6. Task Manager (`agents/task_manager.py`)
+
+**Purpose**: Deterministic task/reminder CRUD (zero LLM)
+
+**Flow**:
+```
+1. Strip task prefix ("remind me to", "todo:", etc.)
+2. Detect action (add/list/complete/delete)
+3. For add:
+   a. Extract date with dateparser ("tomorrow", "next Friday")
+   b. Extract priority (urgent→high, no rush→low)
+   c. Default reminder at 9 AM on due date
+   d. Save to tasks table in SQLite
+4. For complete:
+   a. Match by #number or keyword overlap
+   b. Mark as completed in DB
+5. Scheduler: check_reminders() runs every 15 min
+```
+
+#### 7. Rescue Agent (`agents/rescue_agent.py`)
 
 **Purpose**: Self-healing system for failed tasks
 
@@ -702,7 +754,7 @@ save_to_knowledge_graph()
     ├─ Create embeddings (contextual)
     ├─ Link to daily note
     ├─ Create bidirectional edges
-    └─ Store in ChromaDB + PostgreSQL
+    └─ Store in ChromaDB + SQLite
     ↓
 Return formatted result
     ↓
@@ -734,7 +786,7 @@ archivist agent decides:
     │   └─ Apply type filter
     └─ Backlinks → get_backlinks()
     ↓
-Retrieve from ChromaDB + PostgreSQL
+Retrieve from ChromaDB + SQLite
     ↓
 Format results with:
     ├─ Relevance scores
@@ -807,53 +859,40 @@ Document structure:
 - `update()` - Modify metadata
 - `delete()` - Remove entries
 
-### PostgreSQL (Metadata Store)
+### SQLite (Metadata Store) — `data/brain.db`
 
 **Tables**:
 
 ```sql
 -- Knowledge Entries
-CREATE TABLE knowledge_entries (
+CREATE TABLE knowledge (
     id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    content TEXT,
-    type TEXT,
-    source TEXT,
-    created_at TIMESTAMP,
+    text TEXT NOT NULL,
+    tags TEXT DEFAULT '[]',        -- JSON array
+    source TEXT DEFAULT '',
+    metadata TEXT DEFAULT '{}',    -- JSON object
+    created_at TEXT
+);
+
+-- Tasks & Reminders
+CREATE TABLE tasks (
+    id TEXT PRIMARY KEY,
     user_id TEXT,
-    metadata JSONB
-);
-
--- Tags (Hierarchical)
-CREATE TABLE tags (
-    id SERIAL PRIMARY KEY,
-    tag TEXT UNIQUE NOT NULL,
-    parent_tag TEXT,
-    level INTEGER
-);
-
--- Entry Tags (Many-to-many)
-CREATE TABLE entry_tags (
-    entry_id TEXT REFERENCES knowledge_entries(id),
-    tag TEXT REFERENCES tags(tag),
-    PRIMARY KEY (entry_id, tag)
-);
-
--- Links (Bidirectional)
-CREATE TABLE links (
-    source_id TEXT REFERENCES knowledge_entries(id),
-    target_id TEXT REFERENCES knowledge_entries(id),
-    relationship TEXT,
-    PRIMARY KEY (source_id, target_id, relationship)
-);
-
--- Daily Notes
-CREATE TABLE daily_notes (
-    date DATE PRIMARY KEY,
-    note_id TEXT REFERENCES knowledge_entries(id),
-    content TEXT
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    due_date TEXT,
+    reminder_at TEXT,
+    status TEXT DEFAULT 'pending',
+    priority TEXT DEFAULT 'medium',
+    tags TEXT DEFAULT '[]',
+    linked_knowledge TEXT DEFAULT '[]',
+    recurrence TEXT,
+    created_at TEXT,
+    completed_at TEXT
 );
 ```
+
+Journal entries are stored in the `knowledge` table with `metadata` containing `"content_type": "journal"`.
 
 ### NetworkX Graph (In-Memory)
 
@@ -958,32 +997,38 @@ pm2 restart all    # Restart services
 
 ```
 assistant-brain-os/
-├── main.py                 # Telegram bot & router
+├── main.py                 # Telegram bot & deterministic router
 ├── worker.py               # Job executor
 ├── manage.py               # CLI management
 │
 ├── agents/
 │   ├── content_saver.py    # YouTube, web, tweet extraction
-│   ├── archivist.py        # Search & retrieval
-│   ├── researcher.py       # Deep research
+│   ├── archivist.py        # Search & retrieval (deterministic)
+│   ├── researcher.py       # Deep research (LLM for synthesis)
 │   ├── writer.py           # Content creation
+│   ├── journal.py          # Voice/text journaling (zero LLM)
+│   ├── task_manager.py     # Task/reminder CRUD (zero LLM)
+│   ├── coder.py            # Code generation
 │   └── rescue_agent.py     # Self-healing system
 │
 ├── common/
-│   ├── database.py         # Vector DB + hybrid search
+│   ├── database.py         # SQLite + ChromaDB + hybrid search
 │   ├── knowledge_graph.py  # NetworkX graph + Obsidian features
 │   ├── config.py           # Configuration
-│   └── contracts.py        # Data models
+│   └── contracts.py        # Data models (Job, AgentResponse, etc.)
 │
-├── docs/
-│   ├── ARCHITECTURE.md     # This file
-│   ├── README.md           # Project overview
-│   ├── AGENTS.md           # Agent documentation
-│   ├── RESCUE_SYSTEM.md    # Rescue agent details
-│   └── YOUTUBE_FEATURE.md  # YouTube extraction guide
+├── tests/
+│   ├── test_bug_fixes.py       # Core agent tests
+│   ├── test_message_handling.py # Routing tests
+│   ├── test_task_manager.py    # 61 task manager tests
+│   ├── test_journal.py         # 51 journal tests
+│   ├── test_skill_loader.py    # Skill system tests
+│   ├── test_coder.py           # Coder agent tests
+│   └── test_goal_tracker.py    # Goal tracker tests
 │
-└── tests/
-    └── ...
+└── data/
+    ├── brain.db            # SQLite database
+    └── chroma/             # ChromaDB vector store
 ```
 
 ### Environment Variables
@@ -998,8 +1043,8 @@ OPENAI_API_KEY=...
 LLM_PROVIDER=deepseek
 MODEL_NAME=deepseek-chat
 REDIS_URL=redis://localhost:6379
-POSTGRES_URL=postgresql://...
-CHROMA_PATH=./chroma_db
+DATABASE_PATH=data/brain.db
+CHROMA_PATH=data/chroma
 ```
 
 ---
@@ -1009,7 +1054,9 @@ CHROMA_PATH=./chroma_db
 ### Latency
 
 - URL detection: < 1ms (regex)
-- Agent routing: ~100-200ms (LLM call)
+- Agent routing: < 1ms (deterministic regex, zero LLM)
+- Journal save: < 50ms (deterministic)
+- Task CRUD: < 20ms (deterministic)
 - YouTube extraction: 5-10s (transcript + metadata + LLM)
 - Semantic search: ~100-300ms (vector similarity)
 - Hybrid search: ~200-400ms (BM25 + semantic)
@@ -1069,12 +1116,13 @@ CHROMA_PATH=./chroma_db
 
 ## Version History
 
+- **v4.0** (2026-02-08): Journal agent, task manager, deterministic routing, 362 tests
 - **v3.0** (2026-02-05): Rescue system, YouTube, Obsidian features
 - **v2.0** (2026-02-04): Knowledge graph, agents
 - **v1.0** (2026-02-03): Initial release
 
 ---
 
-**Last Updated**: 2026-02-05
+**Last Updated**: 2026-02-08
 **Maintained By**: Development Team
 **Questions**: See README.md or AGENTS.md

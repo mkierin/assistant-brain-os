@@ -2,7 +2,24 @@
 
 A modular multi-agent system designed to act as your "Second Brain." It listens for input via Telegram (voice and text), intelligently routes requests to specialized AI agents, and processes tasks asynchronously while building a searchable knowledge base with Obsidian-style features.
 
-## ✨ Latest Features (v3.0)
+## ✨ Latest Features (v4.0)
+
+### 📓 Journal Agent (NEW)
+- **Voice & text journaling** via Telegram
+- **Auto-linking** to knowledge graph and related notes
+- **Mood detection** (positive/negative/neutral)
+- **Topic extraction** (keyword-based, zero LLM)
+- **Cross-linking** to existing knowledge entries
+- **Voice journal mode** — all voice messages auto-routed to journal
+- Fully deterministic — zero LLM calls
+
+### ✅ Task Manager (NEW)
+- **Natural language date parsing** ("remind me tomorrow", "by next Friday")
+- **Priority detection** (urgent/high/medium/low)
+- **Recurring reminders** with scheduler (checks every 15 min)
+- **Task CRUD** — add, list, complete, delete
+- **Auto-linking** tasks to related knowledge
+- Deterministic — zero LLM calls
 
 ### 🎥 YouTube Video Intelligence
 - **Automatic transcript extraction** (free, no API key needed)
@@ -66,8 +83,7 @@ graph TB
     end
 
     subgraph "Orchestration Layer"
-        MAIN[main.py<br/>Router & URL Detection]
-        ROUTER[Intent Router<br/>LLM-based]
+        MAIN[main.py<br/>Deterministic Router & URL Detection]
     end
 
     subgraph "Queue System"
@@ -84,6 +100,8 @@ graph TB
         ARCH[📚 Archivist<br/>Hybrid Search & Backlinks]
         RES[🔬 Researcher<br/>Web Research]
         WRI[✍️ Writer<br/>Content Creation]
+        JRNL[📓 Journal<br/>Voice/Text Diary]
+        TASK[✅ Task Manager<br/>Reminders & Todos]
         RESCUE[🚁 Rescue Agent<br/>AI Self-Healing]
     end
 
@@ -92,7 +110,7 @@ graph TB
     end
 
     subgraph "Storage Layer"
-        POSTGRES[(PostgreSQL<br/>Metadata & Relations)]
+        SQLITE[(SQLite<br/>Metadata & Relations)]
         CHROMA[(ChromaDB<br/>Vector Embeddings<br/>Hybrid Search)]
     end
 
@@ -108,9 +126,7 @@ graph TB
     TGU -->|Text/Voice/URLs| TG
     TG -->|Receive Message| MAIN
     MAIN -->|Voice| OPENAI
-    MAIN -->|Detect URLs| ROUTER
-    MAIN -->|Route Intent| ROUTER
-    ROUTER -->|Enqueue Job| REDIS
+    MAIN -->|Deterministic Routing| REDIS
 
     REDIS -->|Pop Job| W1
     REDIS -->|Pop Job| W2
@@ -119,12 +135,16 @@ graph TB
     W1 -->|Execute| ARCH
     W1 -->|Execute| RES
     W1 -->|Execute| WRI
+    W1 -->|Execute| JRNL
+    W1 -->|Execute| TASK
     W1 -->|On Failure| RESCUE
 
     W2 -->|Execute| CSAVER
     W2 -->|Execute| ARCH
     W2 -->|Execute| RES
     W2 -->|Execute| WRI
+    W2 -->|Execute| JRNL
+    W2 -->|Execute| TASK
     W2 -->|On Failure| RESCUE
 
     CSAVER -->|Extract| YT
@@ -134,7 +154,13 @@ graph TB
 
     ARCH -->|Hybrid Search| CHROMA
     ARCH -->|Get Backlinks| KG
-    ARCH -->|Query Graph| POSTGRES
+    ARCH -->|Query| SQLITE
+
+    JRNL -->|Save Entry| SQLITE
+    JRNL -->|Embed| CHROMA
+    JRNL -->|Cross-Link| KG
+
+    TASK -->|CRUD| SQLITE
 
     RES -->|Search| TAVILY
     RES -->|Search| DDG
@@ -147,7 +173,7 @@ graph TB
     RESCUE -->|Diagnose| DEEPSEEK
     RESCUE -->|Requeue| REDIS
 
-    KG -->|Store| POSTGRES
+    KG -->|Store| SQLITE
     KG -->|Embed| CHROMA
 
     CHROMA -->|Embeddings| OPENAI
@@ -163,10 +189,12 @@ graph TB
     style ARCH fill:#FF9800
     style RES fill:#FF9800
     style WRI fill:#FF9800
+    style JRNL fill:#FF9800
+    style TASK fill:#FF9800
     style RESCUE fill:#E91E63
     style KG fill:#9C27B0
     style REDIS fill:#F44336
-    style POSTGRES fill:#9C27B0
+    style SQLITE fill:#9C27B0
     style CHROMA fill:#9C27B0
 ```
 
@@ -182,7 +210,7 @@ graph LR
 
     subgraph "Data Services"
         R[Redis<br/>Queue & Cache<br/>Port 6379]
-        PG[PostgreSQL<br/>Metadata & Graph<br/>Port 5432]
+        SQ[SQLite<br/>Metadata & Tasks<br/>data/brain.db]
         CH[ChromaDB<br/>Vector Store<br/>File-based]
         NX[NetworkX<br/>Knowledge Graph<br/>In-Memory]
     end
@@ -194,19 +222,19 @@ graph LR
     P2 -->|Vectors| CH
     P3 -->|Vectors| CH
 
-    P2 -->|Metadata| PG
-    P3 -->|Metadata| PG
+    P2 -->|Metadata| SQ
+    P3 -->|Metadata| SQ
 
     P2 -->|Graph Ops| NX
     P3 -->|Graph Ops| NX
 
-    NX -.->|Persists to| PG
+    NX -.->|Persists to| SQ
 
     style P1 fill:#4CAF50
     style P2 fill:#2196F3
     style P3 fill:#2196F3
     style R fill:#F44336
-    style PG fill:#9C27B0
+    style SQ fill:#9C27B0
     style CH fill:#9C27B0
     style NX fill:#673AB7
 ```
@@ -248,10 +276,10 @@ graph LR
   - Hybrid search (BM25 + semantic)
   - Contextual retrieval
   - Search result caching
-- **PostgreSQL** - Relational database
-  - Metadata storage
-  - Tag hierarchy
-  - Bidirectional link relationships
+- **SQLite** - Relational database (`data/brain.db`)
+  - Metadata storage (knowledge entries)
+  - Task & reminder tracking
+  - Journal entries (content_type="journal")
   - Knowledge graph persistence
 - **NetworkX** - Graph library
   - In-memory knowledge graph
@@ -300,14 +328,17 @@ graph LR
 **Responsibilities:**
 - Listens to Telegram messages (text & voice)
 - Converts voice messages to text using OpenAI Whisper
-- Routes user requests to appropriate agents using LLM-based intent classification
+- Routes user requests to appropriate agents using **deterministic regex-based routing** (zero LLM calls)
 - Enqueues jobs into Redis with unique job IDs
 - Sends immediate acknowledgment to users
+- Runs reminder scheduler (checks every 15 minutes)
 
 **Key Features:**
 - Multi-modal input (text + voice)
-- Intelligent intent routing
+- Deterministic routing via `route_deterministic()` — pure regex, zero LLM
+- Voice journal mode (auto-route voice to journal agent)
 - Asynchronous job queuing
+- Scheduled reminder checks via JobQueue
 
 ### 2. **Worker Processes (worker.py)** - The Consumers
 
@@ -416,8 +447,7 @@ sequenceDiagram
         LLM-->>M: Return text
     end
 
-    M->>LLM: Route intent (Archivist/Researcher/Writer)
-    LLM-->>M: Return agent + payload
+    M->>M: route_deterministic(text)
 
     M->>R: Enqueue Job (ID, agent, payload)
     M->>T: Send acknowledgment with Job ID
@@ -541,12 +571,14 @@ Drafting and formatting content...
 The bot includes a comprehensive command menu accessible via Telegram's menu button:
 
 ```
-/start  - 🏠 Welcome & overview
-/help   - 📖 Detailed help & examples
-/status - 📊 Check system status
-/search - 🔍 Search your knowledge base
-/stats  - 📈 View usage statistics
+/start    - 🏠 Welcome & overview
+/help     - 📖 Detailed help & examples
+/status   - 📊 Check system status
+/search   - 🔍 Search your knowledge base
+/stats    - 📈 View usage statistics
 /settings - ⚙️ Configure preferences
+/tasks    - ✅ View pending tasks & reminders
+/journal  - 📓 View recent journal entries
 ```
 
 #### 6. **User Settings Interface**
@@ -559,6 +591,7 @@ Interactive settings with inline keyboard buttons for easy configuration:
 - Response verbosity (brief/normal/detailed)
 - Notification preferences
 - Default agent selection
+- Voice journal mode (ON/OFF) — routes all voice to journal
 ```
 
 #### 7. **Real-Time Voice Feedback**
@@ -574,70 +607,65 @@ When processing voice messages:
 
 ### Comprehensive Test Suite
 
-The system includes **45+ test cases** across **6 test files**, providing robust coverage of all critical functionality.
+The system includes **362 test cases** across **8+ test files**, providing robust coverage of all critical functionality.
 
 #### Test Files
 
-1. **`tests/test_contracts.py`** ✅ (15 tests - All passing)
-   - Job model creation and validation
-   - KnowledgeEntry model testing
-   - AgentResponse structure validation
-   - Status enumerations
-   - Serialization/deserialization
-
-2. **`tests/test_agents.py`** (12+ tests)
+1. **`tests/test_bug_fixes.py`** - Core agent tests
    - Archivist save/search operations
    - Researcher web research capabilities
-   - Writer content formatting
+   - Content saver extraction
    - Error handling for all agents
-   - Empty/invalid input handling
 
-3. **`tests/test_message_handling.py`** (15+ tests)
+2. **`tests/test_message_handling.py`** - Message routing
    - Casual message detection
    - Actionable message detection
-   - Intent routing logic
+   - Deterministic routing logic
    - User settings management
-   - Thinking message variations
 
-4. **`tests/test_worker.py`** (8+ tests)
-   - Successful job processing
-   - Retry logic on failures
-   - Max retries enforcement
-   - Agent chaining
-   - Dynamic agent loading
+3. **`tests/test_task_manager.py`** (61 tests)
+   - Action detection (add/list/complete/delete)
+   - Natural language date extraction
+   - Prefix stripping
+   - Priority detection
+   - Routing from main.py
+   - DB CRUD operations
+   - Complete target matching
+   - Task list formatting
+   - Full integration tests
 
-5. **`tests/test_integration.py`** (8+ tests)
-   - End-to-end save→search workflow
-   - Research→write workflow
-   - Error recovery
-   - Concurrent operations
-   - Data persistence
+4. **`tests/test_journal.py`** (51 tests)
+   - Action detection (save/view)
+   - Prefix stripping
+   - Topic extraction
+   - Mood detection
+   - Title generation
+   - Routing from main.py
+   - Journal list formatting
+   - Full integration tests with mocked DB
 
-6. **`tests/test_config.py`** (3+ tests)
-   - Environment variable loading
-   - Default values
-   - Required configuration
+5. **`tests/test_skill_loader.py`** - Skill system tests
+
+6. **`tests/test_coder.py`** - Coder agent tests
+
+7. **`tests/test_goal_tracker.py`** - Goal tracker tests
+
+8. **Other test files** - Contracts, config, workers
 
 #### Running Tests
 
 ```bash
-# Quick run (using test runner)
-./run_tests.sh
-
-# Manual run
+# Run all tests
+cd /root/assistant-brain-os
 source venv/bin/activate
 python -m pytest tests/ -v
 
-# With coverage report
-python -m pytest tests/ --cov=. --cov-report=html
-open htmlcov/index.html
+# Run specific test files
+python -m pytest tests/test_task_manager.py -v
+python -m pytest tests/test_journal.py -v
 
-# Run specific test file
-python -m pytest tests/test_contracts.py -v
-
-# Run by marker
-pytest tests/ -m unit           # Only unit tests
-pytest tests/ -m integration    # Only integration tests
+# Run core suite
+python -m pytest tests/test_bug_fixes.py tests/test_skill_loader.py tests/test_coder.py tests/test_goal_tracker.py tests/test_message_handling.py tests/test_task_manager.py tests/test_journal.py -v
 ```
 
 #### Test Coverage
@@ -816,18 +844,23 @@ if update.message.voice:
     text = transcript.text
 ```
 
-### 3. Intent Routing
+### 3. Deterministic Routing
 
-LLM analyzes the message and determines which agent should handle it:
+Pure regex-based routing — zero LLM calls:
 ```python
-routing = await route_intent(text)
-# Returns: {"agent": "archivist", "payload": {"text": "...", "action": "save"}}
+agent = route_deterministic(text)
+# Returns: "archivist", "researcher", "journal", "task_manager", etc.
 ```
 
-Routing logic considers:
-- Keywords (save, search, research, write)
-- Context of the request
-- User's intent
+Routing steps (in order):
+1. URL detection → content_saver
+2. Casual messages → AI chat response
+3. Archivist patterns (save, remember, search, find)
+4. Researcher patterns (questions, "research", "look up")
+5. Journal patterns ("journal:", "diary:", "show my journal")
+6. Task manager patterns ("remind me", "todo", "my tasks", "done with #N")
+7. Writer, coder, goal tracker patterns
+8. Default → researcher
 
 ### 4. Job Queuing
 
@@ -959,7 +992,42 @@ await context.bot.send_message(
 
 **Example**: "Write a blog post about X using my notes" → Retrieves context, generates draft
 
-#### 5. 🚁 Rescue Agent (NEW)
+#### 5. 📓 Journal Agent
+**Purpose**: Voice & text journaling with auto-linking
+
+**Capabilities**:
+- **Prefix stripping**: Removes "journal:", "diary entry:", "daily log:", etc.
+- **Topic extraction**: Keyword-based (no LLM), filters stop words, max 7 topics
+- **Mood detection**: Regex patterns for positive/negative/neutral
+- **Cross-linking**: Searches existing knowledge and creates edges in knowledge graph
+- **View history**: List recent journal entries with formatting
+- **Voice journal mode**: Setting to auto-route all voice messages to journal
+
+**Architecture**: Fully deterministic — zero LLM calls. "Code decides" principle.
+
+**Example**:
+- Voice: "Had a great meeting about the Python migration project" → Saves with mood=positive, topics=#meeting #python #migration, linked to related notes
+- Text: "show my journal" → Lists last 7 entries with dates and tags
+
+#### 6. ✅ Task Manager Agent
+**Purpose**: Deterministic task/reminder CRUD with natural language dates
+
+**Capabilities**:
+- **Date parsing**: "tomorrow", "next Friday", "by March 15" via `dateparser`
+- **Priority detection**: urgent/asap → high, no rush → low
+- **Task CRUD**: Add, list, complete (by #number or keyword), delete
+- **Reminder scheduler**: `check_reminders()` runs every 15 min via JobQueue
+- **Auto-linking**: Tasks linked to related knowledge entries
+- **Smart matching**: Complete tasks by number or keyword overlap
+
+**Architecture**: Fully deterministic — zero LLM calls.
+
+**Example**:
+- "remind me to call John tomorrow at 3pm" → Task: "Call John", due tomorrow, reminder at 3pm
+- "my tasks" → Lists all pending tasks with due dates and priorities
+- "done with #2" → Completes task #2
+
+#### 7. 🚁 Rescue Agent
 **Purpose**: Self-healing system for failed tasks
 
 **Capabilities**:
@@ -979,68 +1047,43 @@ await context.bot.send_message(
 
 ### Agent Architecture
 
-Each agent follows this pattern (updated for DeepSeek compatibility):
+The system uses two agent patterns:
+
+#### Pattern 1: Deterministic Agents (Zero LLM)
+Used by journal, task_manager, archivist, content_saver — "Code decides, LLM formats":
 ```python
-from pydantic_ai import Agent, RunContext
-from pydantic_ai.models.openai import OpenAIModel
-from contracts import AgentResponse
+from common.contracts import AgentResponse
+from common.database import db
 
-# Initialize with DeepSeek provider
-# IMPORTANT: Use output_type=str for DeepSeek compatibility
-# DeepSeek doesn't support structured outputs (Pydantic models)
-agent = Agent(
-    model=OpenAIModel('deepseek-chat', provider='deepseek'),
-    output_type=str,  # Changed from AgentResponse
-    system_prompt="Agent instructions..."
-)
+async def execute(payload) -> AgentResponse:
+    """Deterministic — no LLM calls."""
+    if isinstance(payload, str):
+        text = payload
+        user_id = "default"
+    else:
+        text = payload.get("text", "")
+        user_id = str(payload.get("user_id", "default"))
 
-# Define tools
-@agent.tool
-async def tool_function(ctx: RunContext, param: str) -> str:
-    # Tool implementation
-    return result
-
-# Execution wrapper
-class AgentClass:
-    async def execute(self, payload: dict) -> AgentResponse:
-        try:
-            result = await agent.run(prompt)
-
-            # Manually wrap string output in AgentResponse
-            return AgentResponse(
-                success=True,
-                output=result.output,  # Changed from result.data
-                next_agent=None,
-                data=None,
-                error=None
-            )
-        except Exception as e:
-            return AgentResponse(
-                success=False,
-                output="",
-                next_agent=None,
-                data=None,
-                error=str(e)
-            )
+    action = _detect_action(text)  # Pure regex
+    # ... process deterministically ...
+    return AgentResponse(success=True, output="result")
 ```
 
-### Key Implementation Notes
-
-**DeepSeek Compatibility:**
-- Use `output_type=str` instead of `output_type=AgentResponse`
-- DeepSeek doesn't support structured outputs (Pydantic models as output)
-- Manually wrap the string response in `AgentResponse` objects
-- Access result with `result.output` (not `result.data`)
-
-**Provider Configuration:**
+#### Pattern 2: LLM-Assisted Agents
+Used by researcher, writer — LLM for formatting/synthesis only:
 ```python
-# Correct way to initialize DeepSeek
-model = OpenAIModel('deepseek-chat', provider='deepseek')
+from pydantic_ai import Agent
+from common.contracts import AgentResponse
 
-# The provider='deepseek' string tells PydanticAI to:
-# - Use DEEPSEEK_API_KEY from environment
-# - Point to https://api.deepseek.com
-# - Handle DeepSeek-specific API quirks
+agent = Agent(model, output_type=str, system_prompt="...")
+
+async def execute(payload) -> AgentResponse:
+    # Gather data deterministically first
+    results = db.search_clean(query)
+    web_results = search_web(query)
+    # LLM only for formatting/synthesis
+    result = await agent.run(format_prompt(results))
+    return AgentResponse(success=True, output=result.output)
 ```
 
 ### Agent Communication
@@ -1482,10 +1525,10 @@ This repository includes 10 focused documentation files covering all aspects of 
 ## 🤝 Contributing
 
 When adding new features:
-1. Create new agent in `/agents/` following existing pattern
-2. Add agent to intent router in `main.py`
+1. Create new agent in `/agents/` following existing pattern (prefer deterministic, zero-LLM)
+2. Add routing patterns to `route_deterministic()` in `main.py`
 3. Update `AGENTS.md` with agent documentation
-4. Add tests in `/tests/` (maintain >80% coverage)
+4. Add tests in `/tests/` (maintain >80% coverage, currently 362 tests)
 5. Update this README with architectural changes
 6. Test with both text and voice inputs
 7. Verify security (run `.env` not committed)

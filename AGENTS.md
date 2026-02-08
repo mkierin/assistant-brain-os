@@ -1,8 +1,8 @@
 # 🤖 Agent System Documentation
 
-**Version**: 3.0 (Updated 2026-02-05)
+**Version**: 4.0 (Updated 2026-02-08)
 
-Complete guide to all agents in the Assistant Brain OS system.
+Complete guide to all agents in the Assistant Brain OS system, including the new Journal and Task Manager agents.
 
 ---
 
@@ -13,8 +13,8 @@ The Assistant Brain OS uses a **multi-agent architecture** where specialized AI 
 ### Agent Philosophy
 
 - **Specialization**: Each agent has a specific domain of expertise
-- **Tool-based**: Agents use tools (functions) to perform actions
-- **LLM-powered**: Agents use language models for reasoning
+- **"Code decides, LLM formats"**: Deterministic logic for decisions, LLM only for synthesis/formatting
+- **Zero-LLM agents**: Journal, task manager, archivist use pure regex — no LLM calls
 - **Composable**: Agents can chain together for complex workflows
 - **Self-healing**: Failed tasks automatically trigger rescue agent
 
@@ -464,6 +464,167 @@ User shares: "https://youtube.com/watch?v=no_captions"
 
 ---
 
+### 6. 📓 Journal Agent (Zero LLM)
+
+**File**: `agents/journal.py`
+**Purpose**: Voice & text journaling with auto-linking to knowledge graph
+
+#### Capabilities
+
+- **Fully deterministic** — zero LLM calls
+- **Prefix stripping**: Removes "journal:", "diary entry:", "daily log:", "log:", etc.
+- **Topic extraction**: Keyword-based extraction, filters 60+ stop words, max 7 topics
+- **Mood detection**: Regex patterns for positive (happy, productive, grateful), negative (frustrated, stressed), neutral (okay, fine, normal)
+- **Title generation**: Date + first sentence, truncated to 60 chars
+- **Cross-linking**: Searches existing knowledge for related notes, creates edges in knowledge graph
+- **View history**: Lists last 7 entries with dates, previews, and tags
+
+#### Voice Journal Mode
+
+When the `voice_journal` setting is enabled (via `/settings`), **all voice messages** bypass normal routing and go directly to the journal agent. This enables hands-free diary recording.
+
+#### Functions
+
+```python
+def _strip_journal_prefix(text: str) -> str
+    """Remove 'journal:', 'diary entry:', 'daily log:', etc."""
+
+def _extract_topics(text: str) -> List[str]
+    """Extract meaningful topics/tags. No LLM. Max 7, deduped."""
+
+def _detect_mood(text: str) -> Optional[str]
+    """Simple regex mood detection: positive/negative/neutral/None."""
+
+def _generate_title(text: str, date: str) -> str
+    """Date + first sentence, truncated to 60 chars."""
+
+def _find_related_knowledge(text: str, topics: List[str]) -> List[Dict]
+    """Search existing knowledge for cross-linking."""
+
+def _link_to_knowledge_graph(entry_id, title, content, tags, related)
+    """Add journal node + create 'related-to' edges."""
+
+def _detect_action(text: str) -> str
+    """'save' or 'view' based on regex patterns."""
+
+async def execute(payload) -> AgentResponse
+    """Entry point. Routes to _handle_save or _handle_view."""
+```
+
+#### Storage
+
+- Saved to `knowledge` table with `content_type: "journal"` in metadata
+- Tags always include: `["journal", "YYYY-MM-DD", ...topics]`
+- Metadata: `{content_type, date, input_source, user_id, mood}`
+
+#### Usage Examples
+
+```
+User (voice): "Had a productive meeting about the Python migration"
+→ Strips prefix, extracts topics: #meeting #python #migration
+→ Detects mood: positive
+→ Searches KB, finds related "Python Notes" entry
+→ Creates knowledge graph edges
+→ Returns: "Journal entry saved for 2026-02-08. Mood: positive. Topics: #meeting, #python, #migration. Linked to 1 related note: Python Notes"
+
+User: "show my journal"
+→ Detects action: view
+→ Lists last 7 entries with dates and tags
+```
+
+---
+
+### 7. ✅ Task Manager Agent (Zero LLM)
+
+**File**: `agents/task_manager.py`
+**Purpose**: Deterministic task/reminder CRUD with natural language dates
+
+#### Capabilities
+
+- **Fully deterministic** — zero LLM calls
+- **Natural language dates**: "tomorrow", "next Friday", "by March 15" via `dateparser`
+- **Priority detection**: urgent/asap/critical → high, no rush/someday → low, default → medium
+- **Task CRUD**: Add, list, complete (by #number or keyword), delete
+- **Smart completion matching**: Match by task number (#1) or keyword overlap
+- **Reminder scheduler**: `check_reminders()` runs every 15 min via JobQueue
+- **Auto-linking**: Tasks linked to related knowledge entries
+
+#### Functions
+
+```python
+def _detect_action(text: str) -> str
+    """Classify: 'add', 'list', 'complete', or 'delete'."""
+
+def _extract_date_and_task(text: str) -> Tuple[due_date, reminder_at, title]
+    """Parse natural language dates with dateparser. Default reminder: 9 AM."""
+
+def _strip_task_prefix(text: str) -> str
+    """Remove 'remind me to', 'todo:', 'task:', etc."""
+
+def _extract_priority(text: str) -> str
+    """Regex priority detection: high/medium/low."""
+
+def _extract_complete_target(text: str, tasks: List) -> Optional[str]
+    """Find task by #number or keyword overlap."""
+
+def _format_task_list(tasks: List[Dict]) -> str
+    """Format with due dates, overdue warnings, priority indicators."""
+
+async def execute(payload) -> AgentResponse
+    """Entry point. Routes to add/list/complete/delete handlers."""
+```
+
+#### Database Schema
+
+```sql
+CREATE TABLE tasks (
+    id TEXT PRIMARY KEY,
+    user_id TEXT,
+    title TEXT NOT NULL,
+    due_date TEXT,          -- YYYY-MM-DD
+    reminder_at TEXT,       -- ISO datetime
+    status TEXT DEFAULT 'pending',
+    priority TEXT DEFAULT 'medium',
+    tags TEXT DEFAULT '[]',
+    linked_knowledge TEXT DEFAULT '[]',
+    created_at TEXT,
+    completed_at TEXT
+);
+```
+
+#### Reminder Scheduler
+
+```python
+# In main.py — runs every 15 minutes
+app.job_queue.run_repeating(check_reminders, interval=900, first=60)
+
+async def check_reminders(context):
+    reminders = db.get_due_reminders()
+    for r in reminders:
+        await context.bot.send_message(user_id, f"Reminder: {r['title']}")
+        db.mark_reminder_sent(r['id'])
+```
+
+#### Usage Examples
+
+```
+User: "remind me to call John tomorrow at 3pm"
+→ Strips prefix: "call John tomorrow at 3pm"
+→ Parses date: tomorrow, reminder at 3pm
+→ Priority: medium
+→ Returns: "Task added: Call John\nDue: 2026-02-09\nReminder set: 2026-02-09T15:00:00"
+
+User: "my tasks"
+→ Lists pending tasks with due dates and overdue warnings
+→ "You have 3 pending tasks:\n  1. Call John [due tomorrow]\n  2. Submit report [!!] [OVERDUE by 2 days]"
+
+User: "done with #1"
+→ Matches task #1: "Call John"
+→ Returns: "Done! Completed: Call John\n2 tasks remaining."
+```
+
+---
+
 ## Agent Communication
 
 ### Shared Knowledge Graph
@@ -495,43 +656,46 @@ result = await researcher_agent.run("Research topic X")
 
 ## Technical Implementation
 
-### PydanticAI Pattern
+### Agent Patterns
 
-All agents follow this structure:
+The system uses two patterns:
+
+#### Pattern 1: Deterministic (Zero LLM) — Preferred
+Used by: journal, task_manager, archivist, content_saver
 
 ```python
-from pydantic_ai import Agent, RunContext
-from common.config import get_llm_client
+from common.contracts import AgentResponse
+from common.database import db
 
-# Initialize agent
-agent = Agent(
-    model,
-    output_type=str,  # DeepSeek compatibility
-    system_prompt="You are a [agent type]...",
-    retries=3
-)
+async def execute(payload) -> AgentResponse:
+    """Deterministic — no LLM calls."""
+    if isinstance(payload, str):
+        text = payload
+        user_id = "default"
+    else:
+        text = payload.get("text", "")
+        user_id = str(payload.get("user_id", "default"))
 
-# Define tools
-@agent.tool
-async def tool_function(ctx: RunContext[None], param: str) -> str:
-    """Tool description for LLM."""
-    # Implementation
-    return result
+    action = _detect_action(text)  # Pure regex
+    # Process deterministically, call DB directly
+    return AgentResponse(success=True, output="result")
+```
 
-# Entry point (called by worker)
-async def execute(input: str) -> AgentResponse:
-    """Main execution function."""
-    try:
-        result = await agent.run(input)
-        return AgentResponse(
-            success=True,
-            output=result.output
-        )
-    except Exception as e:
-        return AgentResponse(
-            success=False,
-            error=str(e)
-        )
+#### Pattern 2: LLM-Assisted
+Used by: researcher, writer — LLM for formatting/synthesis only
+
+```python
+from pydantic_ai import Agent
+from common.contracts import AgentResponse
+
+agent = Agent(model, output_type=str, system_prompt="...")
+
+async def execute(payload) -> AgentResponse:
+    # Gather data deterministically first
+    results = db.search_clean(query)
+    # LLM only for formatting
+    result = await agent.run(format_prompt(results))
+    return AgentResponse(success=True, output=result.output)
 ```
 
 ### Dynamic Loading
@@ -569,8 +733,8 @@ DEEPSEEK_API_KEY=sk-...
 OPENAI_API_KEY=sk-...  # For Whisper only
 
 # Database
-CHROMA_PATH=./chroma_db
-POSTGRES_URL=postgresql://...
+CHROMA_PATH=data/chroma
+DATABASE_PATH=data/brain.db
 REDIS_URL=redis://localhost:6379
 ```
 
@@ -619,11 +783,13 @@ print(result.output)
 ### Unit Tests
 
 ```bash
-# Run agent tests
-pytest tests/test_agents.py -v
+# Run all 362 tests
+pytest tests/ -v
 
-# Test specific agent
-pytest tests/test_agents.py::test_content_saver -v
+# Test specific agents
+pytest tests/test_journal.py -v         # 51 journal tests
+pytest tests/test_task_manager.py -v    # 61 task manager tests
+pytest tests/test_bug_fixes.py -v       # Core agent tests
 ```
 
 ---
@@ -650,7 +816,7 @@ async def execute(input: str) -> AgentResponse:
     return AgentResponse(success=True, output=result.output)
 ```
 
-3. **Register in routing**: Update `main.py` route_intent()
+3. **Register in routing**: Add patterns to `route_deterministic()` in `main.py`
 
 4. **Add tests**: Create `tests/test_my_agent.py`
 
@@ -666,6 +832,8 @@ async def execute(input: str) -> AgentResponse:
 - Archivist (search): 100-300ms
 - Researcher (web): 10-30s (multi-source)
 - Writer (draft): 3-7s (LLM generation)
+- Journal (save): < 50ms (zero LLM, deterministic)
+- Task Manager (CRUD): < 20ms (zero LLM, deterministic)
 - Rescue (diagnosis): 3-5s (LLM analysis)
 
 ### Cost per Request
@@ -674,6 +842,8 @@ async def execute(input: str) -> AgentResponse:
 - Archivist: $0.001-0.002 (embeddings)
 - Researcher: $0.05-0.10 (multi-source + synthesis)
 - Writer: $0.02-0.05 (generation)
+- Journal: $0.00 (zero LLM)
+- Task Manager: $0.00 (zero LLM)
 - Rescue: $0.02-0.03 (diagnosis)
 
 ---
@@ -682,14 +852,13 @@ async def execute(input: str) -> AgentResponse:
 
 Potential agents to add:
 
-- **📊 Analyst Agent**: Data analysis and visualization
+- **📊 Daily Briefing Agent**: Proactive morning briefings with overdue tasks, journal streaks, related knowledge suggestions
 - **🎨 Designer Agent**: Generate diagrams and visuals
-- **📅 Planner Agent**: Task and project planning
-- **🔗 Connector Agent**: Integration with external services
+- **🔗 Connector Agent**: Integration with external services (Notion, Obsidian sync)
 - **🤝 Collaborator Agent**: Multi-user coordination
 - **🎓 Tutor Agent**: Interactive learning and teaching
 
 ---
 
-**Last Updated**: 2026-02-05
+**Last Updated**: 2026-02-08
 **See Also**: ARCHITECTURE.md, README.md, RESCUE_SYSTEM.md
