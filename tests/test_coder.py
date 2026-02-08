@@ -249,22 +249,14 @@ class TestCoderRouting:
     """Tests that coder-related messages get routed correctly."""
 
     def test_web_routing_create_data_model(self):
-        """'create a data model' should route to coder in web backend."""
-        # Read and check the web backend routing function
-        backend_path = "/root/brain-web-interface/backend/main.py"
-        with open(backend_path) as f:
-            content = f.read()
-
-        assert "coder" in content, "Web backend should reference coder agent"
-        assert "data model" in content, "Web backend should route 'data model' to coder"
+        """'create a data model' should route to coder via shared routing."""
+        from common.routing import route_deterministic
+        assert route_deterministic("create a data model for sales") == "coder"
 
     def test_web_routing_generate(self):
-        """'generate' keyword should be in coder routing."""
-        backend_path = "/root/brain-web-interface/backend/main.py"
-        with open(backend_path) as f:
-            content = f.read()
-
-        assert "generate" in content, "Web backend should route 'generate' to coder"
+        """'generate' keyword should route to coder via shared routing."""
+        from common.routing import route_deterministic
+        assert route_deterministic("generate a load script") == "coder"
 
     def test_telegram_routing_has_coder(self):
         """main.py router prompt should include coder agent."""

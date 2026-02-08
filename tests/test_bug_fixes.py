@@ -399,12 +399,12 @@ class TestWebMessageRouting:
         assert route("write an email to my boss") == "writer"
         assert route("draft a report about Q4") == "writer"
 
-    def test_web_backend_has_routing_function(self):
-        """Verify the web backend main.py contains _route_web_message."""
+    def test_web_backend_uses_shared_routing(self):
+        """Verify the web backend imports route_deterministic from common.routing."""
         with open('/root/brain-web-interface/backend/main.py', 'r') as f:
             source = f.read()
-        assert 'def _route_web_message' in source
-        assert 'current_agent="archivist"' not in source.split('_route_web_message')[1][:500]
+        assert 'from common.routing import route_deterministic' in source
+        assert 'route_deterministic' in source
 
 
 # ============================================================
