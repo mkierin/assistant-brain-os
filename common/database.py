@@ -8,6 +8,7 @@ import os
 import re
 import uuid
 import httpx
+from datetime import datetime
 from typing import List, Dict, Optional
 from rank_bm25 import BM25Okapi
 
@@ -42,6 +43,30 @@ class Database:
         # Indexes for common query patterns
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_created_at ON knowledge(created_at)")
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_source ON knowledge(source)")
+
+        # Tasks / reminders table
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                user_id TEXT,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                due_date TEXT,
+                reminder_at TEXT,
+                status TEXT DEFAULT 'pending',
+                priority TEXT DEFAULT 'medium',
+                tags TEXT DEFAULT '[]',
+                linked_knowledge TEXT DEFAULT '[]',
+                recurrence TEXT,
+                created_at TEXT,
+                completed_at TEXT
+            )
+        """)
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date)")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_reminder_at ON tasks(reminder_at)")
+
         self.conn.commit()
 
     def _create_contextual_text(self, entry: KnowledgeEntry) -> str:
@@ -590,5 +615,162 @@ class Database:
                 removed += 1
                 print(f"  Removed garbage entry: {repr(text[:50])}")
         return removed
+
+    # ── Task / Reminder methods ──────────────────────────────────────
+
+    def add_task(
+        self,
+        user_id: str,
+        title: str,
+        description: str = "",
+        due_date: Optional[str] = None,
+        reminder_at: Optional[str] = None,
+        priority: str = "medium",
+        tags: Optional[List[str]] = None,
+        linked_knowledge: Optional[List[str]] = None,
+        recurrence: Optional[str] = None,
+    ) -> str:
+        """Add a task/reminder. Returns the task ID."""
+        task_id = str(uuid.uuid4())
+        now = datetime.now().isoformat()
+
+        self.cursor.execute(
+            """INSERT INTO tasks
+               (id, user_id, title, description, due_date, reminder_at,
+                status, priority, tags, linked_knowledge, recurrence, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)""",
+            (
+                task_id, str(user_id), title, description,
+                due_date, reminder_at, priority,
+                json.dumps(tags or []),
+                json.dumps(linked_knowledge or []),
+                recurrence, now,
+            ),
+        )
+        self.conn.commit()
+        return task_id
+
+    def get_tasks(
+        self,
+        user_id: str,
+        status: Optional[str] = None,
+        due_before: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict]:
+        """Get tasks for a user, optionally filtered by status/due date."""
+        query = "SELECT * FROM tasks WHERE user_id = ?"
+        params: list = [str(user_id)]
+
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+
+        if due_before:
+            query += " AND due_date IS NOT NULL AND due_date <= ?"
+            params.append(due_before)
+
+        query += " ORDER BY CASE WHEN due_date IS NULL THEN 1 ELSE 0 END, due_date ASC, created_at DESC LIMIT ?"
+        params.append(limit)
+
+        self.cursor.execute(query, params)
+        rows = self.cursor.fetchall()
+        columns = [desc[0] for desc in self.cursor.description]
+        tasks = []
+        for row in rows:
+            task = dict(zip(columns, row))
+            task['tags'] = json.loads(task['tags']) if task['tags'] else []
+            task['linked_knowledge'] = json.loads(task['linked_knowledge']) if task['linked_knowledge'] else []
+            tasks.append(task)
+        return tasks
+
+    def complete_task(self, task_id: str, user_id: str) -> bool:
+        """Mark a task as completed. Returns True if found and updated."""
+        self.cursor.execute(
+            "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ? AND user_id = ?",
+            (datetime.now().isoformat(), task_id, str(user_id)),
+        )
+        self.conn.commit()
+        return self.cursor.rowcount > 0
+
+    def get_due_reminders(self, before: str) -> List[Dict]:
+        """Get all pending tasks with reminder_at <= before that haven't been sent yet.
+
+        Args:
+            before: ISO datetime string — return reminders due at or before this time.
+        """
+        self.cursor.execute(
+            """SELECT * FROM tasks
+               WHERE status = 'pending'
+                 AND reminder_at IS NOT NULL
+                 AND reminder_at <= ?
+            ORDER BY reminder_at ASC""",
+            (before,),
+        )
+        rows = self.cursor.fetchall()
+        columns = [desc[0] for desc in self.cursor.description]
+        results = []
+        for row in rows:
+            task = dict(zip(columns, row))
+            task['tags'] = json.loads(task['tags']) if task['tags'] else []
+            task['linked_knowledge'] = json.loads(task['linked_knowledge']) if task['linked_knowledge'] else []
+            results.append(task)
+        return results
+
+    def mark_reminder_sent(self, task_id: str):
+        """Clear reminder_at after sending so it doesn't fire again."""
+        self.cursor.execute(
+            "UPDATE tasks SET reminder_at = NULL WHERE id = ?",
+            (task_id,),
+        )
+        self.conn.commit()
+
+    def delete_task(self, task_id: str, user_id: str) -> bool:
+        """Delete a task. Returns True if found and deleted."""
+        self.cursor.execute(
+            "DELETE FROM tasks WHERE id = ? AND user_id = ?",
+            (task_id, str(user_id)),
+        )
+        self.conn.commit()
+        return self.cursor.rowcount > 0
+
+    # ── Journal methods ──────────────────────────────────────────────
+
+    def get_journal_entries(
+        self,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        limit: int = 10,
+    ) -> List[Dict]:
+        """Get journal entries, optionally filtered by date range.
+
+        Filters on metadata containing content_type = journal.
+        """
+        query = "SELECT id, text, tags, source, metadata, created_at FROM knowledge WHERE metadata LIKE '%\"content_type\": \"journal\"%'"
+        params: list = []
+
+        if date_from:
+            query += " AND created_at >= ?"
+            params.append(date_from)
+        if date_to:
+            query += " AND created_at <= ?"
+            params.append(date_to)
+
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        self.cursor.execute(query, params)
+        rows = self.cursor.fetchall()
+        results = []
+        for row in rows:
+            meta = json.loads(row[4]) if row[4] else {}
+            results.append({
+                'id': row[0],
+                'content': row[1] or '',
+                'tags': json.loads(row[2]) if row[2] else [],
+                'source': row[3] or '',
+                'metadata': meta,
+                'created_at': row[5] or '',
+            })
+        return results
 
 db = Database()

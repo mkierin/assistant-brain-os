@@ -15,6 +15,7 @@ USER_SETTINGS_KEY = "user_settings:{user_id}"
 DEFAULT_SETTINGS = {
     "auto_route": True,
     "voice_enabled": True,
+    "voice_journal": False,
     "notifications": True,
     "default_agent": "auto",
     "max_retries": 3
@@ -243,7 +244,39 @@ def route_deterministic(text: str) -> str:
         if re.search(pattern, text_lower):
             return "researcher"
 
-    # 5. Explicit save/store intent → archivist
+    # 5. Journal / diary entries → journal
+    journal_patterns = [
+        r'^journal\s*(?:entry)?\s*[:;-]',
+        r'^diary\s*(?:entry)?\s*[:;-]',
+        r'^daily\s*(?:log|note|entry)\s*[:;-]',
+        r'^log\s*[:;-]',
+        r'\b(?:my|show|view|read|list|see|recent|last)\s*(?:journal|diary)\s*(?:entries?)?\b',
+        r'\b(?:journal|diary)\s*(?:entries|history|list)\b',
+        r'\bwhat\s+did\s+i\s+(?:write|journal|log)\b',
+    ]
+    for pattern in journal_patterns:
+        if re.search(pattern, text_lower):
+            return "journal"
+
+    # 6. Tasks / reminders / to-dos → task_manager
+    task_patterns = [
+        r'\bremind\s+me\b',
+        r'\b(?:add\s+)?(?:a\s+)?(?:todo|to-?do)\b',
+        r'\b(?:add\s+)?(?:a\s+)?task\b',
+        r'\bset\s+(?:a\s+)?reminder\b',
+        r'\bdon\'?t\s+(?:let\s+me\s+)?forget\b',
+        r'\b(?:my|show|list|view|see|pending|upcoming)\s*(?:tasks?|todos?|to-?dos?|reminders?)\b',
+        r'\b(?:tasks?|todos?|to-?dos?|reminders?)\s*(?:list|pending|upcoming|due)\b',
+        r'\b(?:done|finished|completed?|check\s*off|mark\s*done)\s+(?:with\s+)?(?:#?\d+|task|todo)\b',
+        r'\bdeadline\b',
+        r'\bdue\s+(?:date|on|by)\b',
+        r'\bi\s+(?:need|have|want|must)\s+to\b.*\b(?:by|before|on|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b',
+    ]
+    for pattern in task_patterns:
+        if re.search(pattern, text_lower):
+            return "task_manager"
+
+    # 7. Explicit save/store intent → archivist
     save_patterns = [
         r'\bsave\b', r'\bremember\b', r'\bstore\b',
         r'\bnote\s*(this|that|:)\b', r'\bkeep\s*(this|that)\b',
@@ -253,7 +286,7 @@ def route_deterministic(text: str) -> str:
         if re.search(pattern, text_lower):
             return "archivist"
 
-    # 6. Explicit knowledge base search → archivist
+    # 8. Explicit knowledge base search → archivist
     kb_patterns = [
         r'\b(my|your)\s+(notes?|knowledge|brain|saved|entries)\b',
         r'\bwhat\s+(did|do)\s+(i|we|you)\s+(save|have|know)\b',
@@ -264,7 +297,7 @@ def route_deterministic(text: str) -> str:
         if re.search(pattern, text_lower):
             return "archivist"
 
-    # 7. General questions → researcher (it checks brain first, then web)
+    # 9. General questions → researcher (it checks brain first, then web)
     question_patterns = [
         r'^(what|where|when|who|how|why|which|is|are|was|were|can|could|do|does|did|will|would|should)\b',
         r'\?$',
@@ -274,11 +307,11 @@ def route_deterministic(text: str) -> str:
         if re.search(pattern, text_lower):
             return "researcher"
 
-    # 8. Short messages without clear intent → archivist (search mode)
+    # 10. Short messages without clear intent → archivist (search mode)
     if len(text.split()) <= 5:
         return "archivist"
 
-    # 9. Default: longer text is probably something to save
+    # 11. Default: longer text is probably something to save
     return "archivist"
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -313,6 +346,21 @@ Formats and creates content
 • "Format this as a report: [your text]"
 • "Draft a professional message about..."
 • "Help me write a summary of..."
+
+**5. Journal** 📓
+Voice & text journaling with auto-linking
+• "Journal: Had a great meeting with the team today"
+• "Diary: worked on the new feature, feeling productive"
+• Send voice messages (enable voice_journal in /settings to auto-journal all voice)
+• "Show my journal" — view recent entries
+
+**6. Task Manager** ✅
+Tasks, to-dos, and reminders
+• "Remind me to submit the report by Friday"
+• "Todo: prepare slides for Monday meeting"
+• "My tasks" — see all pending tasks
+• "Done with #1" — complete a task
+• "I need to call the client by tomorrow"
 
 ---
 
@@ -369,6 +417,12 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton(
+                f"📓 Voice→Journal: {'✅' if settings.get('voice_journal', False) else '❌'}",
+                callback_data='toggle_voice_journal'
+            )
+        ],
+        [
+            InlineKeyboardButton(
                 f"🔔 Notifications: {'✅' if settings['notifications'] else '❌'}",
                 callback_data='toggle_notifications'
             )
@@ -390,6 +444,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🔄 Auto-Route: {'Enabled' if settings['auto_route'] else 'Disabled'}
 🎤 Voice Messages: {'Enabled' if settings['voice_enabled'] else 'Disabled'}
+📓 Voice→Journal: {'Enabled' if settings.get('voice_journal', False) else 'Disabled'}
 🔔 Notifications: {'Enabled' if settings['notifications'] else 'Disabled'}
 🎯 Default Agent: {settings['default_agent'].title()}
 ↩️ Max Retries: {settings['max_retries']}
@@ -416,6 +471,12 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings['voice_enabled'] = not settings['voice_enabled']
         save_user_settings(user_id, settings)
         await query.edit_message_text("✅ Voice setting updated! Use /settings to see changes.")
+
+    elif query.data == 'toggle_voice_journal':
+        settings['voice_journal'] = not settings.get('voice_journal', False)
+        save_user_settings(user_id, settings)
+        status = "ON — all voice messages will be saved as journal entries" if settings['voice_journal'] else "OFF — voice messages will be routed normally"
+        await query.edit_message_text(f"✅ Voice→Journal: {status}\n\nUse /settings to see changes.")
 
     elif query.data == 'toggle_notifications':
         settings['notifications'] = not settings['notifications']
@@ -809,9 +870,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Show random thinking message
     thinking_msg = await update.message.reply_text(random.choice(THINKING_MESSAGES))
 
+    # Track input type for journal metadata
+    is_voice = bool(update.message.voice)
+
     try:
         # Determine agent — deterministic routing, no LLM call
-        if settings['default_agent'] not in ('auto', 'archivist', 'researcher', 'writer', 'coder', 'content_saver'):
+        # If voice_journal is enabled and this is a voice message, go straight to journal
+        if is_voice and settings.get('voice_journal', False):
+            agent = "journal"
+        elif settings['default_agent'] not in ('auto', 'archivist', 'researcher', 'writer', 'coder', 'content_saver', 'task_manager', 'journal'):
             agent = route_deterministic(text)
         elif settings['auto_route'] or settings['default_agent'] == 'auto':
             agent = route_deterministic(text)
@@ -824,6 +891,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payload = {"text": text}
         payload["source"] = "telegram"
         payload["user_id"] = user_id
+        if is_voice:
+            payload["input_type"] = "voice"
 
         # Classify goal for tracking
         from common.goal_tracker import GoalTracker
@@ -907,17 +976,70 @@ async def setup_bot_menu(application: Application):
         BotCommand("queue", "📋 View pending jobs"),
         BotCommand("issues", "🐛 View unfulfilled requests"),
         BotCommand("fulfillment", "📈 Goal fulfillment stats"),
+        BotCommand("tasks", "✅ View pending tasks & reminders"),
+        BotCommand("journal", "📓 View recent journal entries"),
     ]
 
     await application.bot.set_my_commands(commands)
     print("✅ Bot menu configured with commands")
 
+async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show pending tasks for the user."""
+    from common.database import db as _db
+    from agents.task_manager import _format_task_list
+
+    user_id = str(update.effective_user.id)
+    tasks = _db.get_tasks(user_id, status="pending")
+    output = _format_task_list(tasks)
+    await update.message.reply_text(output)
+
+
+async def journal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show recent journal entries."""
+    from agents.journal import _format_journal_list
+    from common.database import db as _db
+
+    entries = _db.get_journal_entries(limit=7)
+    output = _format_journal_list(entries)
+    await update.message.reply_text(output)
+
+
+async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic job: send Telegram notifications for due reminders."""
+    from datetime import datetime as _dt
+    from common.database import db as _db
+
+    now = _dt.now().isoformat()
+    due = _db.get_due_reminders(before=now)
+
+    for task in due:
+        user_id = task.get("user_id")
+        if not user_id:
+            continue
+        title = task.get("title", "Untitled task")
+        due_date = task.get("due_date", "")
+
+        msg = f"Reminder: {title}"
+        if due_date:
+            msg += f"\nDue: {due_date}"
+
+        try:
+            await context.bot.send_message(chat_id=int(user_id), text=msg)
+        except Exception as e:
+            print(f"Failed to send reminder to {user_id}: {e}")
+
+        # Clear reminder so it doesn't fire again
+        _db.mark_reminder_sent(task["id"])
+
+
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Set up bot menu via post_init hook (avoids deprecated event loop usage)
+    # Set up bot menu and reminder scheduler via post_init
     async def post_init(app):
         await setup_bot_menu(app)
+        # Check for due reminders every 15 minutes
+        app.job_queue.run_repeating(check_reminders, interval=900, first=60)
 
     application.post_init = post_init
 
@@ -932,6 +1054,8 @@ def main():
     application.add_handler(CommandHandler("clear", clear_command))
     application.add_handler(CommandHandler("issues", issues_command))
     application.add_handler(CommandHandler("fulfillment", fulfillment_command))
+    application.add_handler(CommandHandler("tasks", tasks_command))
+    application.add_handler(CommandHandler("journal", journal_command))
 
     # Callback query handler for settings buttons
     application.add_handler(CallbackQueryHandler(settings_callback))
