@@ -80,6 +80,11 @@ graph TB
     subgraph "User Interface"
         TG[Telegram Bot]
         TGU[Telegram User]
+        VJBOT[Voice Journal Bot<br/>Telegram Voice]
+    end
+
+    subgraph "Web Interface"
+        WEB[Web Dashboard<br/>React + FastAPI]
     end
 
     subgraph "Orchestration Layer"
@@ -102,6 +107,7 @@ graph TB
         WRI[✍️ Writer<br/>Content Creation]
         JRNL[📓 Journal<br/>Voice/Text Diary]
         TASK[✅ Task Manager<br/>Reminders & Todos]
+        COD[💻 Coder<br/>Code Generation]
         RESCUE[🚁 Rescue Agent<br/>AI Self-Healing]
     end
 
@@ -125,6 +131,8 @@ graph TB
 
     TGU -->|Text/Voice/URLs| TG
     TG -->|Receive Message| MAIN
+    VJBOT -->|Voice Messages| MAIN
+    WEB -->|HTTP Request| REDIS
     MAIN -->|Voice| OPENAI
     MAIN -->|Deterministic Routing| REDIS
 
@@ -137,6 +145,7 @@ graph TB
     W1 -->|Execute| WRI
     W1 -->|Execute| JRNL
     W1 -->|Execute| TASK
+    W1 -->|Execute| COD
     W1 -->|On Failure| RESCUE
 
     W2 -->|Execute| CSAVER
@@ -145,6 +154,7 @@ graph TB
     W2 -->|Execute| WRI
     W2 -->|Execute| JRNL
     W2 -->|Execute| TASK
+    W2 -->|Execute| COD
     W2 -->|On Failure| RESCUE
 
     CSAVER -->|Extract| YT
@@ -170,6 +180,8 @@ graph TB
     WRI -->|Generate| DEEPSEEK
     WRI -->|Context| CHROMA
 
+    COD -->|Generate| DEEPSEEK
+
     RESCUE -->|Diagnose| DEEPSEEK
     RESCUE -->|Requeue| REDIS
 
@@ -179,7 +191,9 @@ graph TB
     CHROMA -->|Embeddings| OPENAI
 
     W1 -->|Success| TG
+    W1 -->|Success| WEB
     W2 -->|Success| TG
+    W2 -->|Success| WEB
     TG -->|Response| TGU
 
     style MAIN fill:#4CAF50
@@ -191,11 +205,14 @@ graph TB
     style WRI fill:#FF9800
     style JRNL fill:#FF9800
     style TASK fill:#FF9800
+    style COD fill:#FF9800
     style RESCUE fill:#E91E63
     style KG fill:#9C27B0
     style REDIS fill:#F44336
     style SQLITE fill:#9C27B0
     style CHROMA fill:#9C27B0
+    style WEB fill:#00BCD4
+    style VJBOT fill:#8BC34A
 ```
 
 ### Process Management Architecture
@@ -206,6 +223,12 @@ graph LR
         P1[brain-bot<br/>main.py<br/>URL Detection & Routing]
         P2[brain-worker<br/>worker.py<br/>Instance 1<br/>+ Rescue System]
         P3[brain-worker<br/>worker.py<br/>Instance 2<br/>+ Rescue System]
+        P4[voice-journal-bot<br/>Voice Journal<br/>Telegram]
+        P5[brain-web-api<br/>FastAPI<br/>Port 8000]
+    end
+
+    subgraph "Web Layer"
+        NG[Nginx<br/>Reverse Proxy<br/>Port 80]
     end
 
     subgraph "Data Services"
@@ -228,11 +251,21 @@ graph LR
     P2 -->|Graph Ops| NX
     P3 -->|Graph Ops| NX
 
+    P5 -->|Enqueue Jobs| R
+    P5 -->|Query| SQ
+    P5 -->|Search| CH
+    P5 -->|Graph Ops| NX
+
+    NG -->|Proxy| P5
+
     NX -.->|Persists to| SQ
 
     style P1 fill:#4CAF50
     style P2 fill:#2196F3
     style P3 fill:#2196F3
+    style P4 fill:#8BC34A
+    style P5 fill:#00BCD4
+    style NG fill:#FF5722
     style R fill:#F44336
     style SQ fill:#9C27B0
     style CH fill:#9C27B0
@@ -304,12 +337,14 @@ graph LR
 - **PM2** - Process management
   - 1 bot instance (URL detection & routing)
   - 2 worker instances (with rescue system)
+  - 1 voice journal bot (voice message handling)
+  - 1 web API (FastAPI dashboard backend)
   - Auto-restart, monitoring
 - **rank-bm25** - Keyword search for hybrid retrieval
 
 ### Development & Testing
 - **pytest** - Testing framework
-  - 45+ test cases
+  - 423 test cases
   - Async support
   - Real API testing
 - **pytest-cov** - Coverage reporting
@@ -432,26 +467,34 @@ graph LR
 sequenceDiagram
     participant U as User
     participant T as Telegram Bot
+    participant WEB as Web Dashboard
     participant M as main.py
+    participant F as FastAPI
     participant R as Redis Queue
     participant W as Worker
     participant A as Agent
     participant DB as Storage
     participant LLM as DeepSeek
 
-    U->>T: Send message (text/voice)
-    T->>M: Forward message
+    alt Telegram Path
+        U->>T: Send message (text/voice)
+        T->>M: Forward message
 
-    alt Voice Message
-        M->>LLM: Transcribe with Whisper
-        LLM-->>M: Return text
+        alt Voice Message
+            M->>LLM: Transcribe with Whisper
+            LLM-->>M: Return text
+        end
+
+        M->>M: route_deterministic(text)
+        M->>R: Enqueue Job (ID, agent, payload)
+        M->>T: Send acknowledgment with Job ID
+        T->>U: "Job queued: ABC123"
+    else Web Path
+        U->>WEB: Send message via browser
+        WEB->>F: HTTP POST /api/message
+        F->>R: Enqueue Job (ID, agent, payload, source=web)
+        F->>WEB: Return Job ID
     end
-
-    M->>M: route_deterministic(text)
-
-    M->>R: Enqueue Job (ID, agent, payload)
-    M->>T: Send acknowledgment with Job ID
-    T->>U: "Job queued: ABC123"
 
     R->>W: Worker pops job
     W->>W: Load agent class dynamically
@@ -466,8 +509,13 @@ sequenceDiagram
     A-->>W: Return result
 
     alt Success
-        W->>T: Send success message
-        T->>U: Display result
+        alt Telegram Source
+            W->>T: Send success message
+            T->>U: Display result
+        else Web Source
+            W->>WEB: Send result via API
+            WEB->>U: Display result in browser
+        end
     else Error
         W->>W: Retry (max 3x)
         alt All Retries Failed
@@ -607,7 +655,7 @@ When processing voice messages:
 
 ### Comprehensive Test Suite
 
-The system includes **362 test cases** across **8+ test files**, providing robust coverage of all critical functionality.
+The system includes **423 test cases** across **8+ test files**, providing robust coverage of all critical functionality.
 
 #### Test Files
 
@@ -1182,23 +1230,7 @@ python check_system.py
 
 ### High Priority
 
-#### 1. **Health Monitoring**
-```python
-# Add health check endpoint
-from fastapi import FastAPI
-app = FastAPI()
-
-@app.get("/health")
-async def health_check():
-    return {
-        "redis": check_redis_connection(),
-        "database": check_db_connection(),
-        "workers": get_worker_count(),
-        "queue_size": get_queue_size()
-    }
-```
-
-#### 2. **Job Status Tracking**
+#### 1. **Job Status Tracking**
 ```python
 # Store job status in Redis
 JOB_STATUS_KEY = "job_status:{job_id}"
@@ -1209,7 +1241,7 @@ await context.bot.send_message(
 )
 ```
 
-#### 3. **Dead Letter Queue**
+#### 2. **Dead Letter Queue**
 ```python
 # Move failed jobs to separate queue for analysis
 DEAD_LETTER_QUEUE = "dead_letter_queue"
@@ -1218,7 +1250,7 @@ if retry_count >= MAX_RETRIES:
     r.lpush(DEAD_LETTER_QUEUE, job.model_dump_json())
 ```
 
-#### 4. **Rate Limiting**
+#### 3. **Rate Limiting**
 ```python
 from redis import Redis
 from datetime import datetime, timedelta
@@ -1232,7 +1264,7 @@ def rate_limit(user_id: int, limit: int = 10, window: int = 60):
     return current <= limit
 ```
 
-#### 5. **Metrics & Analytics**
+#### 4. **Metrics & Analytics**
 ```python
 # Track usage metrics
 from prometheus_client import Counter, Histogram
@@ -1244,7 +1276,7 @@ agent_counter = Counter('agent_calls_total', 'Agent calls', ['agent_name'])
 
 ### Medium Priority
 
-#### 6. **User Context Management**
+#### 5. **User Context Management**
 ```python
 # Store user conversation context
 class UserContext:
@@ -1259,7 +1291,7 @@ class UserContext:
         self.history = self.history[-10:]
 ```
 
-#### 7. **Multi-Language Support**
+#### 6. **Multi-Language Support**
 ```python
 # Add language detection and translation
 from langdetect import detect
@@ -1269,7 +1301,7 @@ if detected_lang != 'en':
     text = translate(text, source=detected_lang, target='en')
 ```
 
-#### 8. **Agent Chaining**
+#### 7. **Agent Chaining**
 ```python
 # Allow agents to call other agents
 class Job:
@@ -1282,7 +1314,7 @@ if needs_formatting:
     job.chain_data = {"research_results": results}
 ```
 
-#### 9. **Webhook Integration**
+#### 8. **Webhook Integration**
 ```python
 # Allow external systems to send data
 @app.post("/webhook/{agent_name}")
@@ -1292,7 +1324,7 @@ async def webhook_handler(agent_name: str, data: dict):
     return {"job_id": job.id}
 ```
 
-#### 10. **Backup & Recovery**
+#### 9. **Backup & Recovery**
 ```bash
 # Automated backups
 #!/bin/bash
@@ -1303,21 +1335,7 @@ rsync -av backup_${DATE}.tar.gz remote_server:/backups/
 
 ### Low Priority
 
-#### 11. **Web Dashboard**
-```python
-# Add admin dashboard
-from fastapi.templating import Jinja2Templates
-
-@app.get("/dashboard")
-async def dashboard():
-    return templates.TemplateResponse("dashboard.html", {
-        "workers": get_worker_stats(),
-        "jobs": get_recent_jobs(),
-        "agents": get_agent_stats()
-    })
-```
-
-#### 12. **Agent Marketplace**
+#### 10. **Agent Marketplace**
 ```python
 # Allow users to enable/disable agents
 class AgentRegistry:
@@ -1329,7 +1347,7 @@ class AgentRegistry:
         }
 ```
 
-#### 13. **Advanced RAG Features**
+#### 11. **Advanced RAG Features**
 ```python
 # Implement hybrid search (vector + keyword)
 def hybrid_search(query: str, k: int = 5):
@@ -1338,7 +1356,7 @@ def hybrid_search(query: str, k: int = 5):
     return merge_and_rerank(vector_results, keyword_results)
 ```
 
-#### 14. **Cost Tracking**
+#### 12. **Cost Tracking**
 ```python
 # Monitor API costs
 class CostTracker:
@@ -1528,7 +1546,7 @@ When adding new features:
 1. Create new agent in `/agents/` following existing pattern (prefer deterministic, zero-LLM)
 2. Add routing patterns to `route_deterministic()` in `main.py`
 3. Update `AGENTS.md` with agent documentation
-4. Add tests in `/tests/` (maintain >80% coverage, currently 362 tests)
+4. Add tests in `/tests/` (maintain >80% coverage, currently 423 tests)
 5. Update this README with architectural changes
 6. Test with both text and voice inputs
 7. Verify security (run `.env` not committed)
