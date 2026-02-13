@@ -205,8 +205,8 @@ def _format_search_results(results: list, search_topic: str) -> str:
                 content = content[bracket_end + 3:]
 
         # Truncate for preview
-        preview = content[:300].strip()
-        if len(content) > 300:
+        preview = content[:500].strip()
+        if len(content) > 500:
             preview += "..."
 
         output += f"{i}. {title}\n"
@@ -248,7 +248,7 @@ async def execute(payload: dict) -> AgentResponse:
             # No LLM involved — guaranteed to return actual results
             search_topic = _extract_search_topic(topic)
             print(f"🔍 Searching for: {search_topic}")
-            results = db.search_clean(search_topic, limit=5)
+            results = db.search_clean(search_topic, limit=10)
             output = _format_search_results(results, search_topic)
         elif action == "save":
             # Validate content before saving

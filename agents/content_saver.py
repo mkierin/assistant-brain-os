@@ -364,6 +364,45 @@ def _extract_title_from_content(extracted: str, url: str) -> str:
     return urlparse(url).netloc
 
 
+async def _enrich_short_content(content: str, url: str, content_type: str) -> str:
+    """Enrich short content (tweets, brief notes) by extracting and expanding meaning.
+
+    Short content like tweets often contain abbreviations, implied context, and references
+    that are hard to search for later. This adds a semantic summary that makes the content
+    more discoverable and useful in the knowledge base.
+    """
+    # Only enrich content that's short enough to benefit
+    if len(content) > 800 or content_type not in ("tweet", "webpage"):
+        return content
+
+    try:
+        client = get_async_client()
+        model = get_model_name()
+
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": (
+                    "You are a knowledge base assistant. Given a short piece of content (a tweet, brief post, etc.), "
+                    "extract and expand its meaning into a concise knowledge note. Include:\n"
+                    "- The core idea or claim being made\n"
+                    "- Key entities, technologies, or concepts mentioned\n"
+                    "- Any implicit context that would help find this later\n\n"
+                    "Write 2-4 sentences. Be factual, don't add opinions. "
+                    "Start with 'Key insight:' or 'About:'. Keep the original content intact below your summary."
+                )},
+                {"role": "user", "content": f"Content ({content_type}):\n{content}"}
+            ],
+            temperature=0.2,
+            max_tokens=200
+        )
+        enrichment = response.choices[0].message.content.strip()
+        return f"{enrichment}\n\n---\nOriginal:\n{content}"
+    except Exception as e:
+        print(f"⚠️ Content enrichment failed: {e}")
+        return content
+
+
 def _save_content_to_db(title: str, content: str, url: str, tags: List[str]) -> int:
     """Save extracted content directly to DB + knowledge graph. Returns related count."""
     metadata = {
@@ -459,8 +498,12 @@ async def execute(payload) -> AgentResponse:
         title = _extract_title_from_content(extracted, url)
         tags = _auto_tags(extracted, url)
 
+        # Step 3.5: Enrich short content (tweets, brief posts) for better searchability
+        content_type = _content_type(url)
+        enriched = await _enrich_short_content(extracted, url, content_type)
+
         # Step 4: Save directly to DB + knowledge graph
-        related_count = _save_content_to_db(title, extracted, url, tags)
+        related_count = _save_content_to_db(title, enriched, url, tags)
 
         # Step 5: Build response
         output = f"Saved! {title}\n"

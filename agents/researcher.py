@@ -4,7 +4,7 @@ from common.llm import get_async_client, get_model_name
 from duckduckgo_search import DDGS
 
 
-def _search_brain_direct(query: str, limit: int = 3) -> list:
+def _search_brain_direct(query: str, limit: int = 8) -> list:
     """Search knowledge base directly. Returns list of dicts or empty list."""
     try:
         return db.search_clean(query, limit=limit)
@@ -36,8 +36,10 @@ async def _synthesize_answer(topic: str, brain_results: list, web_results: list,
         context += "From the user's knowledge base:\n"
         for r in brain_results:
             title = r.get('title', 'Untitled')
-            content = r.get('content', '')[:300]
-            context += f"- {title}: {content}\n"
+            content = r.get('content', '')[:600]
+            tags = r.get('tags', [])
+            tag_str = f" [tags: {', '.join(tags)}]" if tags else ""
+            context += f"- {title}{tag_str}: {content}\n"
         context += "\n"
 
     if web_results:
@@ -57,16 +59,18 @@ async def _synthesize_answer(topic: str, brain_results: list, web_results: list,
         model=model,
         messages=[
             {"role": "system", "content": (
-                "You are a helpful research assistant. Synthesize a clear, concise answer "
+                "You are a helpful research assistant. Synthesize a clear, comprehensive answer "
                 "from the search results provided. Be casual and friendly, like texting a knowledgeable friend. "
-                "Mention if info came from the user's knowledge base vs the web. "
-                "Include relevant source links. Keep it under 300 words. "
+                "PRIORITIZE the user's knowledge base results — those are their personal notes and saved content. "
+                "Mention what came from their knowledge base vs the web. "
+                "Include relevant source links. If the user has saved multiple things on this topic, "
+                "connect the dots and summarize the themes. Keep it under 400 words. "
                 "If there's conversation history, take it into account for follow-up questions."
             )},
             {"role": "user", "content": f"Question: {topic}\n\n{context}"}
         ],
         temperature=0.3,
-        max_tokens=600
+        max_tokens=800
     )
     return response.choices[0].message.content.strip()
 
@@ -76,11 +80,15 @@ def _format_raw_results(topic: str, brain_results: list, web_results: list) -> s
     output = ""
 
     if brain_results:
-        output += "From your knowledge base:\n\n"
+        output += f"From your knowledge base ({len(brain_results)} results):\n\n"
         for i, r in enumerate(brain_results, 1):
             title = r.get('title', 'Untitled')
-            content = r.get('content', '')[:200]
-            output += f"{i}. {title}\n   {content}\n\n"
+            content = r.get('content', '')[:400]
+            tags = r.get('tags', [])
+            output += f"{i}. {title}\n   {content}\n"
+            if tags:
+                output += f"   Tags: {', '.join(tags[:5])}\n"
+            output += "\n"
 
     if web_results:
         output += "From the web:\n\n"

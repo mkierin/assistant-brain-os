@@ -82,6 +82,8 @@ class Database:
         if entry.text.startswith('#'):
             title_match = entry.text.split('\n')[0].strip('# ')
             title = title_match if title_match else "Untitled"
+        elif entry.metadata.get('title'):
+            title = entry.metadata['title']
 
         # Build context string
         context_parts = [f"Document: {title}"]
@@ -92,8 +94,15 @@ class Database:
         if entry.source:
             context_parts.append(f"Source: {entry.source}")
 
+        content_type = entry.metadata.get('content_type', '')
+        if content_type:
+            context_parts.append(f"Type: {content_type}")
+
         if 'url' in entry.metadata:
-            context_parts.append(f"URL: {entry.metadata['url']}")
+            # Extract domain for context without the full URL noise
+            domain = entry.metadata.get('domain', '')
+            if domain:
+                context_parts.append(f"From: {domain}")
 
         context = " | ".join(context_parts)
 
@@ -359,7 +368,7 @@ class Database:
             print(f"⚠️  Reranking failed: {e}")
             return []
 
-    def hybrid_search(self, query: str, limit: int = 5, keyword_weight: float = 0.3, semantic_weight: float = 0.7):
+    def hybrid_search(self, query: str, limit: int = 5, keyword_weight: float = 0.4, semantic_weight: float = 0.6):
         """
         Hybrid search combining BM25 (keyword) and semantic (vector) search.
 
@@ -371,14 +380,14 @@ class Database:
         Args:
             query: Search query
             limit: Number of results
-            keyword_weight: Weight for BM25 scores (default 0.3)
-            semantic_weight: Weight for semantic scores (default 0.7)
+            keyword_weight: Weight for BM25 scores (default 0.4)
+            semantic_weight: Weight for semantic scores (default 0.6)
 
         Returns:
             Combined and ranked results
         """
         # Phase 1: Semantic search to get candidate set (fast - uses vector index)
-        candidate_count = min(limit * 4, self.collection.count() or limit)
+        candidate_count = min(limit * 6, self.collection.count() or limit)
         if candidate_count == 0:
             return {'documents': [[]], 'metadatas': [[]], 'distances': [[]], 'ids': [[]]}
 

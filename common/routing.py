@@ -190,6 +190,10 @@ def route_deterministic(text: str) -> str:
         r'\bdo\s+i\s+have\s+(any|something|anything)\b',
         r'\bi\s+(saved|wrote|noted|added)\b.*\b(about|on)\b',
         r'\bmy\s+(stuff|things|entries|records)\b',
+        r'\bwhat\s+do\s+you\s+know\s+about\b',
+        r'\bwhat\s+do\s+you\s+have\s+(about|on)\b',
+        r'\banything\s+(about|on|regarding)\b',
+        r'\btell\s+me\s+about\b',
     ]
     for pattern in kb_patterns:
         if re.search(pattern, text_lower):
