@@ -3,12 +3,13 @@ import chromadb
 from chromadb.utils import embedding_functions
 from .config import DATABASE_PATH, CHROMA_PATH, OPENAI_API_KEY
 from .contracts import KnowledgeEntry
+import hashlib
 import json
 import os
 import re
 import uuid
 import httpx
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from rank_bm25 import BM25Okapi
 
@@ -101,6 +102,85 @@ class Database:
 
         return contextualized
 
+    def _chunk_text(self, text: str, chunk_size: int = 800, overlap: int = 100) -> list:
+        """Split text into overlapping chunks for better semantic coverage.
+
+        Only chunks text longer than chunk_size. Short notes stay as single entries.
+        Uses paragraph boundaries for natural splits.
+        """
+        if len(text) <= chunk_size:
+            return [text]
+
+        chunks = []
+        paragraphs = text.split('\n\n')
+        current_chunk = ""
+
+        for para in paragraphs:
+            if len(current_chunk) + len(para) + 2 <= chunk_size:
+                current_chunk += para + "\n\n"
+            else:
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+                # If single paragraph exceeds chunk_size, split on sentences
+                if len(para) > chunk_size:
+                    sentences = re.split(r'(?<=[.!?])\s+', para)
+                    current_chunk = ""
+                    for sent in sentences:
+                        if len(current_chunk) + len(sent) + 1 <= chunk_size:
+                            current_chunk += sent + " "
+                        else:
+                            if current_chunk.strip():
+                                chunks.append(current_chunk.strip())
+                            current_chunk = sent + " "
+                else:
+                    current_chunk = para + "\n\n"
+
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+
+        return chunks if chunks else [text]
+
+    def _is_duplicate(self, text: str, url: Optional[str] = None) -> Optional[str]:
+        """Check for exact or near-duplicate entries.
+
+        Returns existing entry ID if duplicate found, None otherwise.
+        """
+        # 1. URL match (fast)
+        if url:
+            self.cursor.execute(
+                "SELECT id FROM knowledge WHERE metadata LIKE ?",
+                (f'%"url": "{url}"%',)
+            )
+            row = self.cursor.fetchone()
+            if row:
+                return row[0]
+
+        # 2. Content hash match
+        content_hash = hashlib.sha256(text.strip().lower().encode()).hexdigest()[:32]
+        self.cursor.execute(
+            "SELECT id FROM knowledge WHERE metadata LIKE ?",
+            (f'%"content_hash": "{content_hash}"%',)
+        )
+        row = self.cursor.fetchone()
+        if row:
+            return row[0]
+
+        return None
+
+    def _dedup_chunk_ids(self, result_ids: list) -> list:
+        """Deduplicate result IDs that may contain chunk suffixes.
+
+        '123_chunk_0' and '123_chunk_1' -> '123' (keep first occurrence).
+        """
+        seen_bases = set()
+        deduped = []
+        for doc_id in result_ids:
+            base_id = re.sub(r'_chunk_\d+$', '', doc_id)
+            if base_id not in seen_bases:
+                seen_bases.add(base_id)
+                deduped.append(base_id)
+        return deduped
+
     def add_knowledge(self, entry: KnowledgeEntry, use_contextual: bool = True):
         """
         Add knowledge entry to database.
@@ -112,7 +192,18 @@ class Database:
         # Generate a stable unique ID if not provided
         entry_id = entry.embedding_id or str(uuid.uuid4())
 
-        # Add to SQLite (store original text)
+        # Check for duplicates
+        url = entry.metadata.get('url') if entry.metadata else None
+        existing_id = self._is_duplicate(entry.text, url)
+        if existing_id:
+            print(f"⏭️ Duplicate detected, skipping: {entry.text[:50]}...")
+            return existing_id
+
+        # Store content hash in metadata for future dedup
+        content_hash = hashlib.sha256(entry.text.strip().lower().encode()).hexdigest()[:32]
+        entry.metadata['content_hash'] = content_hash
+
+        # Add to SQLite (store full original text as one row)
         self.cursor.execute(
             "INSERT INTO knowledge (id, text, tags, source, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (
@@ -126,14 +217,38 @@ class Database:
         )
         self.conn.commit()
 
-        # Add to ChromaDB (with contextualized text for better retrieval)
-        text_to_embed = self._create_contextual_text(entry) if use_contextual else entry.text
+        # Chunk text for better embedding coverage
+        chunks = self._chunk_text(entry.text)
 
-        self.collection.add(
-            documents=[text_to_embed],
-            metadatas=[{**entry.metadata, "source": entry.source, "tags": ",".join(entry.tags)}],
-            ids=[entry_id]
-        )
+        if len(chunks) == 1:
+            # Short text: single embedding (original behavior)
+            text_to_embed = self._create_contextual_text(entry) if use_contextual else entry.text
+            self.collection.add(
+                documents=[text_to_embed],
+                metadatas=[{**entry.metadata, "source": entry.source, "tags": ",".join(entry.tags)}],
+                ids=[entry_id]
+            )
+        else:
+            # Long text: multiple chunk embeddings
+            chunk_docs = []
+            chunk_metas = []
+            chunk_ids = []
+            for i, chunk in enumerate(chunks):
+                chunk_entry = KnowledgeEntry(
+                    text=chunk, tags=entry.tags, source=entry.source,
+                    metadata=entry.metadata, created_at=entry.created_at
+                )
+                text_to_embed = self._create_contextual_text(chunk_entry) if use_contextual else chunk
+                chunk_docs.append(text_to_embed)
+                chunk_metas.append({**entry.metadata, "source": entry.source, "tags": ",".join(entry.tags), "parent_id": entry_id})
+                chunk_ids.append(f"{entry_id}_chunk_{i}")
+
+            self.collection.add(
+                documents=chunk_docs,
+                metadatas=chunk_metas,
+                ids=chunk_ids
+            )
+            print(f"📄 Chunked into {len(chunks)} pieces for better search")
 
     async def _rerank_results(self, query: str, documents: List[str]) -> List[Dict]:
         """
@@ -460,6 +575,9 @@ class Database:
             # Fallback: try SQLite LIKE search for exact keyword matches
             return self._sqlite_fallback_search(query, limit)
 
+        # Deduplicate chunk IDs back to base entry IDs
+        result_ids = self._dedup_chunk_ids(result_ids)
+
         # Step 2: Look up original clean text from SQLite by IDs
         clean_results = []
         for doc_id in result_ids:
@@ -519,6 +637,12 @@ class Database:
     def get_all_entries_count(self) -> int:
         """Get total number of entries in the knowledge base."""
         self.cursor.execute("SELECT COUNT(*) FROM knowledge")
+        return self.cursor.fetchone()[0]
+
+    def get_recent_entries_count(self, days: int = 7) -> int:
+        """Get count of entries added in the last N days. Uses SQL WHERE - O(1)."""
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        self.cursor.execute("SELECT COUNT(*) FROM knowledge WHERE created_at >= ?", (cutoff,))
         return self.cursor.fetchone()[0]
 
     def get_all_entries(self, limit: int = 1000) -> List[Dict]:
@@ -586,12 +710,20 @@ class Database:
         ]
 
     def delete_entry(self, entry_id: str):
-        """Delete an entry from the knowledge base"""
-        # Delete from ChromaDB
+        """Delete an entry from the knowledge base (including chunk embeddings)."""
+        # Delete main entry and any chunk entries from ChromaDB
         try:
+            # Try deleting the main ID first
             self.collection.delete(ids=[entry_id])
+        except Exception:
+            pass
+        try:
+            # Also delete any chunks (entry_id_chunk_0, entry_id_chunk_1, etc.)
+            all_ids = self.collection.get(where={"parent_id": entry_id})
+            if all_ids and all_ids.get('ids'):
+                self.collection.delete(ids=all_ids['ids'])
         except Exception as e:
-            print(f"Warning: Could not delete from ChromaDB: {e}")
+            print(f"Warning: Could not delete chunks from ChromaDB: {e}")
 
         # Delete from SQLite
         self.cursor.execute("DELETE FROM knowledge WHERE id = ?", (entry_id,))

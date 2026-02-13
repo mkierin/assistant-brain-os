@@ -1,13 +1,9 @@
 from pydantic_ai import Agent, RunContext
 from common.contracts import AgentResponse
 from common.database import db
-from common.config import OPENAI_API_KEY, DEEPSEEK_API_KEY, LLM_PROVIDER
-from pydantic_ai.models.openai import OpenAIModel
+from common.llm import get_pydantic_ai_model
 
-if LLM_PROVIDER == "deepseek":
-    model = OpenAIModel('deepseek-chat', provider='deepseek')
-else:
-    model = 'openai:gpt-4o-mini'
+model = get_pydantic_ai_model()
 
 # Use str output for DeepSeek compatibility
 writer_agent = Agent(
@@ -30,6 +26,8 @@ async def get_context(ctx: RunContext[None], query: str) -> str:
 
 class Writer:
     async def execute(self, payload: dict) -> AgentResponse:
+        if isinstance(payload, str):
+            payload = {"text": payload}
         content = payload.get("text", payload.get("content", ""))
         format_type = payload.get("format", "general")
 
@@ -38,9 +36,14 @@ class Writer:
             if "research_data" in payload:
                 prompt += f"\n\nUse this research data: {payload['research_data']}"
 
+            # Include conversation context for follow-ups
+            conv = payload.get("conversation_history", [])
+            if conv:
+                ctx_lines = [f"{'User' if m.get('sender') == 'user' else 'Bot'}: {m.get('message', '')}" for m in conv[-4:]]
+                prompt = f"Recent conversation:\n" + "\n".join(ctx_lines) + f"\n\nCurrent request: {prompt}"
+
             result = await writer_agent.run(prompt)
 
-            # Convert string output to AgentResponse
             return AgentResponse(
                 success=True,
                 output=result.output,
@@ -54,3 +57,8 @@ class Writer:
                 output="",
                 error=str(e)
             )
+
+
+async def execute(payload: dict) -> AgentResponse:
+    """Module-level execute for worker compatibility."""
+    return await Writer().execute(payload)

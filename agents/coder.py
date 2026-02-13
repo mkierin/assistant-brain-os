@@ -9,20 +9,17 @@ to a project directory.
 from pydantic_ai import Agent, RunContext
 from common.database import db
 from common.contracts import AgentResponse
-from common.config import DEEPSEEK_API_KEY, LLM_PROVIDER, CODER_MODEL
+from common.config import CODER_MODEL
+from common.llm import get_pydantic_ai_model
 from common.skill_loader import SkillLoader
 from common.project_writer import ProjectWriter
-from pydantic_ai.models.openai import OpenAIModel
 from datetime import datetime
 from typing import Optional
 import uuid
 import json
 
 # Use a more capable model for code generation
-if LLM_PROVIDER == "deepseek":
-    model = OpenAIModel('deepseek-chat', provider='deepseek')
-else:
-    model = f'openai:{CODER_MODEL}'
+model = get_pydantic_ai_model()
 
 # Module-level state (reset per execute() call)
 _skill_loader: Optional[SkillLoader] = None

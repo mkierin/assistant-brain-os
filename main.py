@@ -6,10 +6,9 @@ import random
 import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from openai import OpenAI
-from common.config import TELEGRAM_TOKEN, OPENAI_API_KEY, DEEPSEEK_API_KEY, LLM_PROVIDER, REDIS_URL, TASK_QUEUE
+from common.config import TELEGRAM_TOKEN, REDIS_URL, TASK_QUEUE
 from common.contracts import Job, JobStatus
-from common.routing import route_deterministic
+from common.routing import route_deterministic, is_casual, get_casual_response
 
 # User settings stored in Redis
 USER_SETTINGS_KEY = "user_settings:{user_id}"
@@ -70,12 +69,9 @@ CASUAL_PATTERNS = [
     "bye", "goodbye", "see you", "cya", "later",
 ]
 
-if LLM_PROVIDER == "deepseek":
-    client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
-    MODEL_NAME = "deepseek-chat"
-else:
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    MODEL_NAME = "gpt-4o-mini"
+from common.llm import get_sync_client, get_model_name as _get_model_name
+client = get_sync_client()
+MODEL_NAME = _get_model_name()
 
 r = redis.from_url(REDIS_URL)
 
@@ -750,11 +746,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
 
     # Check if this is casual conversation - respond with AI-generated message
-    if is_casual_message(text):
-        # Show a thinking message
-        thinking_msg = await update.message.reply_text(random.choice(["💬 Thinking...", "💭 One moment...", "🤔 Let me respond..."]))
-        response = await get_casual_response(text)
-        await thinking_msg.edit_text(response)
+    if is_casual(text):
+        response = get_casual_response(text)
+        await update.message.reply_text(response)
         return
 
     # Show random thinking message

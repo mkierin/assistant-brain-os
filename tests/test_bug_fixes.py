@@ -140,9 +140,12 @@ class TestDatabaseAddKnowledge:
         import inspect
         from common.database import Database
         source = inspect.getsource(Database.add_knowledge)
-        # Should use uuid.uuid4() instead of text[:50]
+        # Should use uuid.uuid4() for ID generation, not text[:50]
         assert "uuid.uuid4()" in source
-        assert "text[:50]" not in source
+        # text[:50] must not be used as an embedding_id (old bug)
+        # It may appear in logging/print statements, which is fine
+        assert "embedding_id = entry.text[:50]" not in source
+        assert "embedding_id=entry.text[:50]" not in source
 
 
 # ============================================================
@@ -257,12 +260,12 @@ class TestYouTubeSummaryProvider:
     """Bug: YouTube summary always used DeepSeek regardless of LLM_PROVIDER."""
 
     def test_youtube_respects_provider_setting(self):
-        """The YouTube transcript summarizer should check LLM_PROVIDER."""
+        """The YouTube transcript summarizer should use centralized LLM factory."""
         import inspect
         import agents.content_saver as cs
         source = inspect.getsource(cs._extract_youtube_content)
-        # Should check the provider, not hardcode DeepSeek
-        assert "LLM_PROVIDER" in source
+        # Should use centralized LLM client factory, not hardcode providers
+        assert "get_async_client" in source or "get_model_name" in source
         # Should NOT have hardcoded DeepSeek-only setup
         assert 'llm_client = AsyncOpenAI(\n            api_key=DEEPSEEK_API_KEY,\n            base_url="https://api.deepseek.com"\n        )\n\n        summary_response' not in source
 

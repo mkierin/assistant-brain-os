@@ -9,6 +9,7 @@ from telegram.error import BadRequest
 from common.config import REDIS_URL, TASK_QUEUE, TELEGRAM_TOKEN
 from common.contracts import Job, JobStatus, AgentResponse, FailureDetail
 from common.goal_tracker import GoalTracker
+from common.response_formatter import format_for_human
 
 r = redis.from_url(REDIS_URL)
 bot = Bot(token=TELEGRAM_TOKEN)
@@ -149,17 +150,19 @@ async def process_job(job_data: str):
                 retry_count=job.retry_count
             )
 
-            # Send result to the appropriate channel based on source
+            # Apply personality formatting before sending
             user_id = job.payload.get("user_id")
             source = job.payload.get("source", "telegram")
+            response_text = format_for_human(job.current_agent, response.output, source=source)
 
             if user_id:
                 if source == "web":
                     # Web users: push response to Redis for polling
                     web_response = json.dumps({
                         "id": str(job.id),
-                        "message": response.output,
+                        "message": response_text,
                         "sender": "bot",
+                        "agent": job.current_agent,
                         "timestamp": datetime.now().isoformat()
                     })
                     response_key = f"web_response:{user_id}"
@@ -174,11 +177,11 @@ async def process_job(job_data: str):
                 else:
                     # Telegram users: send message directly
                     try:
-                        await send_long_message(chat_id=user_id, text=response.output)
+                        await send_long_message(chat_id=user_id, text=response_text)
                     except Exception as send_error:
                         print(f"❌ Error sending message: {send_error}")
                         # Fallback: send truncated message
-                        truncated = response.output[:TELEGRAM_MAX_LENGTH-100] + "\n\n...(message truncated - too long)"
+                        truncated = response_text[:TELEGRAM_MAX_LENGTH-100] + "\n\n...(message truncated - too long)"
                         await bot.send_message(chat_id=user_id, text=truncated)
                 
             # Chain next agent if specified

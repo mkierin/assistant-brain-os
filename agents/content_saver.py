@@ -1,6 +1,6 @@
 from common.database import db
 from common.contracts import AgentResponse, KnowledgeEntry
-from common.config import DEEPSEEK_API_KEY, LLM_PROVIDER, OPENAI_API_KEY, MODEL_NAME
+from common.llm import get_async_client, get_model_name
 from common.knowledge_graph import knowledge_graph
 from datetime import datetime
 import httpx
@@ -274,13 +274,8 @@ async def _extract_youtube_content(url: str) -> str:
         # Create summary using LLM (LLM used for formatting only — transcript was already extracted)
         summary = ""
         try:
-            from openai import AsyncOpenAI
-            if LLM_PROVIDER == "deepseek":
-                llm_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
-                summary_model = "deepseek-chat"
-            else:
-                llm_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-                summary_model = MODEL_NAME
+            llm_client = get_async_client()
+            summary_model = get_model_name()
 
             summary_response = await llm_client.chat.completions.create(
                 model=summary_model,

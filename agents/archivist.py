@@ -1,16 +1,12 @@
 from pydantic_ai import Agent, RunContext
 from common.database import db
 from common.contracts import KnowledgeEntry, AgentResponse
-from common.config import OPENAI_API_KEY, DEEPSEEK_API_KEY, LLM_PROVIDER
-from pydantic_ai.models.openai import OpenAIModel
+from common.llm import get_pydantic_ai_model
 from typing import List
 import re
 import uuid
 
-if LLM_PROVIDER == "deepseek":
-    model = OpenAIModel('deepseek-chat', provider='deepseek')
-else:
-    model = 'openai:gpt-4o-mini'
+model = get_pydantic_ai_model()
 
 # Agent for saving knowledge (tool-based)
 archivist_agent = Agent(

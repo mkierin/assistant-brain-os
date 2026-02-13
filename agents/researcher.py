@@ -1,6 +1,6 @@
 from common.database import db
 from common.contracts import AgentResponse
-from common.config import DEEPSEEK_API_KEY, LLM_PROVIDER, OPENAI_API_KEY, MODEL_NAME
+from common.llm import get_async_client, get_model_name
 from duckduckgo_search import DDGS
 
 
@@ -23,18 +23,12 @@ def _search_web_direct(query: str, max_results: int = 5) -> list:
         return []
 
 
-async def _synthesize_answer(topic: str, brain_results: list, web_results: list) -> str:
+async def _synthesize_answer(topic: str, brain_results: list, web_results: list, conversation_history: list = None) -> str:
     """Use LLM to synthesize a nice answer from raw search results.
     This is the ONLY LLM call — used for formatting, not decision-making.
     """
-    from openai import AsyncOpenAI
-
-    if LLM_PROVIDER == "deepseek":
-        client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
-        model = "deepseek-chat"
-    else:
-        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-        model = MODEL_NAME
+    client = get_async_client()
+    model = get_model_name()
 
     # Build context from raw results
     context = ""
@@ -52,14 +46,22 @@ async def _synthesize_answer(topic: str, brain_results: list, web_results: list)
             context += f"- {r.get('title', '')}: {r.get('body', '')}\n"
             context += f"  Source: {r.get('href', '')}\n"
 
+    # Include conversation history for context-aware responses
+    if conversation_history:
+        context += "\nRecent conversation:\n"
+        for msg in conversation_history[-6:]:
+            role = "User" if msg.get("sender") == "user" else "Assistant"
+            context += f"{role}: {msg.get('message', '')[:200]}\n"
+
     response = await client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": (
                 "You are a helpful research assistant. Synthesize a clear, concise answer "
-                "from the search results provided. Be casual and friendly. "
+                "from the search results provided. Be casual and friendly, like texting a knowledgeable friend. "
                 "Mention if info came from the user's knowledge base vs the web. "
-                "Include relevant source links. Keep it under 300 words."
+                "Include relevant source links. Keep it under 300 words. "
+                "If there's conversation history, take it into account for follow-up questions."
             )},
             {"role": "user", "content": f"Question: {topic}\n\n{context}"}
         ],
@@ -121,8 +123,9 @@ async def execute(payload) -> AgentResponse:
             )
 
         # Step 2: Try LLM synthesis (the ONLY LLM call — for formatting, not decision-making)
+        conversation_history = payload.get("conversation_history") if isinstance(payload, dict) else None
         try:
-            output = await _synthesize_answer(topic, brain_results, web_results)
+            output = await _synthesize_answer(topic, brain_results, web_results, conversation_history)
         except Exception as synth_err:
             print(f"⚠️ LLM synthesis failed ({synth_err}), using raw format")
             output = _format_raw_results(topic, brain_results, web_results)
